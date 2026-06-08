@@ -1,0 +1,6 @@
+{
+  "name": "影音重點整理工具",
+  "description": "多功能影音聽寫摘要與多語系（中、英、日、韓）翻譯整理工具，支援錄音、上傳音訊/影片與貼上字幕內容。",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
