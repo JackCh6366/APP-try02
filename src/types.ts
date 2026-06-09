@@ -26,6 +26,7 @@ export interface MediaSummaryResult {
   actionItems: string[]; // To do items extracted
   translations: Record<string, string>; // Language Code -> Translated formatted content (Markdown)
   createdAt: string;
+  usedModel?: string;
 }
 
 export interface SummaryHistoryItem {

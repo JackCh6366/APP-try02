@@ -104,7 +104,7 @@ export default function SummaryResult({ data }: SummaryResultProps) {
         <div>
           <span className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-100">
             <Cpu className="h-3.5 w-3.5 text-indigo-500 animate-spin-slow" />
-            <span>AI 分析模型：gemini-3.5-flash</span>
+            <span>AI 分析模型：{data.usedModel || "gemini-3.5-flash"}</span>
           </span>
           <h2 className="text-xl font-extrabold text-slate-900 mt-2 selection:bg-slate-100">
             {data.title}

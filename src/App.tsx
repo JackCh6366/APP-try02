@@ -157,6 +157,7 @@ export default function App() {
         actionItems: geminiResult.actionItems || [],
         translations: geminiResult.translations || {},
         createdAt: new Date().toISOString(),
+        usedModel: data.usedModel || "gemini-3.5-flash",
       };
 
       // 1. Save full payload to detail key
