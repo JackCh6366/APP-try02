@@ -1,5 +1,6 @@
 export type SummaryDepth = "quick" | "detailed" | "mindmap";
 export type PrimaryGoal = "takeaways" | "actions" | "full-transcript";
+export type AIProvider = "gemini" | "nvidia";
 
 export interface SummaryOptions {
   depth: SummaryDepth;

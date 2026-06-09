@@ -15,11 +15,13 @@ import {
   Sparkles,
   Link,
   Globe,
+  Cpu,
 } from "lucide-react";
-import { SummaryOptions, SummaryDepth, PrimaryGoal } from "../types";
+import { AIProvider, SummaryOptions, SummaryDepth, PrimaryGoal } from "../types";
 
 interface MediaInputProps {
   onProcess: (payload: {
+    provider: AIProvider;
     mediaType: "file" | "record" | "transcript_paste" | "link";
     fileData?: string; // base64 string
     fileName?: string;
@@ -38,6 +40,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
   const [depth, setDepth] = useState<SummaryDepth>("detailed");
   const [primaryGoal, setPrimaryGoal] = useState<PrimaryGoal>("takeaways");
   const [targetLanguages, setTargetLanguages] = useState<string[]>(["zh", "en"]);
+  const [provider, setProvider] = useState<AIProvider>("gemini");
 
   // File Upload states
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -214,6 +217,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         return;
       }
       onProcess({
+        provider,
         mediaType: "file",
         fileData: fileBase64,
         fileName: selectedFile.name,
@@ -232,6 +236,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         const result = reader.result as string;
         const base64Data = result.split(",")[1];
         onProcess({
+          provider,
           mediaType: "record",
           fileData: base64Data,
           fileName: `現場錄音_${new Date().toLocaleDateString("zh-TW")}.webm`,
@@ -246,6 +251,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         return;
       }
       onProcess({
+        provider,
         mediaType: "transcript_paste",
         textTranscript: pastedText,
         options,
@@ -260,6 +266,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         return;
       }
       onProcess({
+        provider,
         mediaType: "link",
         videoLink: videoLink.trim(),
         fileName: videoLink.trim(),
@@ -578,7 +585,51 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         </button>
 
         {showAdvanced && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mt-4 pt-2 bg-slate-50/50 p-4 border border-slate-100 rounded-xl">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-5 mt-4 pt-2 bg-slate-50/50 p-4 border border-slate-100 rounded-xl">
+            <div className="space-y-2">
+              <label className="block text-xs font-bold text-slate-700 tracking-wide">
+                AI Provider
+              </label>
+              <div className="space-y-1.5">
+                <label className="flex items-center p-2 rounded-lg bg-white border border-slate-100 hover:border-slate-300 cursor-pointer transition-all">
+                  <input
+                    type="radio"
+                    name="provider"
+                    value="gemini"
+                    checked={provider === "gemini"}
+                    onChange={() => setProvider("gemini")}
+                    disabled={isLoading}
+                    className="h-4 w-4 text-slate-900 border-slate-300 focus:ring-slate-900"
+                  />
+                  <div className="ml-3 min-w-0">
+                    <span className="block text-xs font-bold text-slate-800">Google Gemini</span>
+                    <span className="block text-[10px] text-slate-400">gemini-2.5-flash-lite</span>
+                  </div>
+                </label>
+                <label className="flex items-center p-2 rounded-lg bg-white border border-slate-100 hover:border-slate-300 cursor-pointer transition-all mt-1.5">
+                  <input
+                    type="radio"
+                    name="provider"
+                    value="nvidia"
+                    checked={provider === "nvidia"}
+                    onChange={() => setProvider("nvidia")}
+                    disabled={isLoading}
+                    className="h-4 w-4 text-slate-900 border-slate-300 focus:ring-slate-900"
+                  />
+                  <div className="ml-3 min-w-0">
+                    <span className="block text-xs font-bold text-slate-800">NVIDIA</span>
+                    <span className="block text-[10px] text-slate-400">llama-3.3-nemotron-super-49b-v1.5</span>
+                  </div>
+                </label>
+              </div>
+              {provider === "nvidia" && (
+                <div className="flex items-start space-x-2 text-[10px] text-slate-500 bg-white border border-slate-100 rounded-lg p-2">
+                  <Cpu className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>NVIDIA text model supports long pasted transcripts and link text.</span>
+                </div>
+              )}
+            </div>
+
             {/* Depth */}
             <div className="space-y-2">
               <label className="block text-xs font-bold text-slate-700 tracking-wide">

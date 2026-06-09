@@ -3,7 +3,7 @@ import Header from "./components/Header";
 import HistorySidebar from "./components/HistorySidebar";
 import MediaInput from "./components/MediaInput";
 import SummaryResult from "./components/SummaryResult";
-import { MediaSummaryResult, SummaryHistoryItem } from "./types";
+import { AIProvider, MediaSummaryResult, SummaryHistoryItem } from "./types";
 import { Sparkles, FileVideo, PlusCircle, AlertCircle, FileText, Globe, History } from "lucide-react";
 
 export default function App() {
@@ -133,6 +133,7 @@ export default function App() {
   };
 
   const handleProcessMedia = async (payload: {
+    provider: AIProvider;
     mediaType: "file" | "record" | "transcript_paste" | "link";
     fileData?: string;
     fileName?: string;
@@ -145,7 +146,7 @@ export default function App() {
     setError(null);
 
     try {
-      const response = await fetch("/api/summarize", {
+      const response = await fetch("/api/generate", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -153,10 +154,19 @@ export default function App() {
         body: JSON.stringify(payload),
       });
 
-      const data = await response.json();
+      const responseText = await response.text();
+      let data: any = {};
+
+      if (responseText.trim()) {
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          throw new Error(`API returned a non-JSON response (${response.status}). ${responseText.slice(0, 200)}`);
+        }
+      }
 
       if (!response.ok || !data.success) {
-        throw new Error(data.error || "模型分析失敗。請更換其他影音檔案或檢查 API 連線品質。");
+        throw new Error(data.error || `API returned an empty response (${response.status}). If you are testing locally, run the app with Vercel Dev so /api/generate is available.`);
       }
 
       // Successful analysis! Register in storage
@@ -180,7 +190,7 @@ export default function App() {
         actionItems: geminiResult.actionItems || [],
         translations: geminiResult.translations || {},
         createdAt: new Date().toISOString(),
-        usedModel: data.usedModel || "gemini-3.5-flash",
+        usedModel: data.usedModel || (payload.provider === "nvidia" ? "nvidia/llama-3.3-nemotron-super-49b-v1.5" : "gemini-2.5-flash-lite"),
       };
 
       // 1. Save full payload to detail key
