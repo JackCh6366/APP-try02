@@ -4,7 +4,7 @@ import HistorySidebar from "./components/HistorySidebar";
 import MediaInput from "./components/MediaInput";
 import SummaryResult from "./components/SummaryResult";
 import { MediaSummaryResult, SummaryHistoryItem } from "./types";
-import { Sparkles, FileVideo, PlusCircle, AlertCircle, FileText, Globe } from "lucide-react";
+import { Sparkles, FileVideo, PlusCircle, AlertCircle, FileText, Globe, History } from "lucide-react";
 
 export default function App() {
   const [history, setHistory] = useState<SummaryHistoryItem[]>([]);
@@ -12,6 +12,7 @@ export default function App() {
   const [activeResult, setActiveResult] = useState<MediaSummaryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false); // 歷史側邊欄是否開啟，預設關閉以維持大版面
 
   // Loading quotes ticker for reassuring user experience during heavy media processing
   const [loadingQuoteIdx, setLoadingQuoteIdx] = useState(0);
@@ -28,15 +29,33 @@ export default function App() {
     "最後數據封裝與 JSON 結構驗證中，即將呈現完美重點包...",
   ];
 
-  // Load history index index table on mount
+  // Load history index table on mount & run automatic health check synchronization to fix anomalies
   useEffect(() => {
     try {
       const storedHistory = localStorage.getItem("media_summaries_history");
       if (storedHistory) {
-        setHistory(JSON.parse(storedHistory));
+        const parsed: SummaryHistoryItem[] = JSON.parse(storedHistory);
+        // 健康分析：自動把 localStorage 中實際已遺失、損壞或損毀的細節項目自動排除，
+        // 避免列表和實際檔案對不起來、觸發異常的情況。
+        const verifiedHistory = parsed.filter((item) => {
+          try {
+            const detail = localStorage.getItem(`media_summary_${item.id}`);
+            return detail !== null;
+          } catch {
+            return false;
+          }
+        });
+
+        // 偵測到任何不一致的殘留項目時，自動覆寫並修正 index 列表
+        if (verifiedHistory.length !== parsed.length) {
+          localStorage.setItem("media_summaries_history", JSON.stringify(verifiedHistory));
+          console.warn(`[歷史紀錄健康檢測] 系統自動修正了 ${parsed.length - verifiedHistory.length} 筆損壞/已遺失詳細檔案的無效殘餘歷史項目。`);
+        }
+        
+        setHistory(verifiedHistory);
       }
     } catch (e) {
-      console.error("無法加載歷史 index 列表:", e);
+      console.error("無法加載歷史清單:", e);
     }
   }, []);
 
@@ -64,11 +83,15 @@ export default function App() {
         setActiveResult(fullDetail);
         setSelectedId(id);
       } else {
-        alert("找不到此歷史紀錄的詳細細節檔案，可能已被手動清除。");
+        // 自動修復損壞項目：若居然找不到詳細檔，自動自歷史清單過濾掉，避免使用者點擊其他有問題的歷史項目
+        const updatedHistory = history.filter((item) => item.id !== id);
+        localStorage.setItem("media_summaries_history", JSON.stringify(updatedHistory));
+        setHistory(updatedHistory);
+        setError("資料不一致：找不到該影音的詳細記錄原始檔。主系統已自動清理此項無效歷史索引。");
       }
     } catch (e) {
       console.error("載入歷史細節出錯:", e);
-      setError("無法讀取此紀錄。該資料可能已損壞。");
+      setError("無法讀取此紀錄。該資料可能已破損或格式有異。");
     }
   };
 
@@ -178,6 +201,7 @@ export default function App() {
       // 3. Mark viewport active
       setSelectedId(id);
       setActiveResult(newResult);
+      setIsHistoryOpen(true); // 自動展開歷史面板以便使用者點按或察看
 
     } catch (err: any) {
       console.error("進行影音重點分析失敗:", err);
@@ -201,20 +225,54 @@ export default function App() {
       {/* Main Workspace Frame */}
       <div className="flex-1 flex flex-col md:flex-row max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 gap-6 overflow-hidden">
         
-        {/* Left Side Panel: Historical entries index */}
-        <div className="w-full md:w-80 shrink-0 md:h-[calc(100vh-13rem)]" id="desktop-history-sidebar-parent">
+        {/* Left Side Panel: Historical entries index (過渡滑入滑出且能安全隱藏，不占版面) */}
+        <div 
+          className={`shrink-0 transition-all duration-300 overflow-hidden ${
+            isHistoryOpen 
+              ? "w-full md:w-80 md:h-[calc(100vh-13rem)] opacity-100" 
+              : "w-0 h-0 md:h-0 opacity-0 pointer-events-none"
+          }`} 
+          id="desktop-history-sidebar-parent"
+        >
           <HistorySidebar
             history={history}
             selectedId={selectedId}
             onSelect={handleSelectHistoryItem}
             onDelete={handleDeleteHistoryItem}
             onClearAll={handleClearAllHistory}
+            onClose={() => setIsHistoryOpen(false)}
           />
         </div>
 
         {/* Right Side Panel: Main Viewport details */}
         <div className="flex-1 flex flex-col overflow-y-auto space-y-6 min-w-0 md:h-[calc(100vh-13rem)] pr-1">
           
+          {/* 歷史紀錄折疊提醒標籤：點擊後才滑出歷史紀錄，平常完美折疊以節約版面 */}
+          {!isHistoryOpen && history.length > 0 && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-white border border-slate-200 px-4 py-2.5 rounded-2xl shadow-2xs gap-3 animate-fade-in">
+              <div className="flex items-center space-x-2.5">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-600"></span>
+                </span>
+                <span className="text-xs font-bold text-slate-500">
+                  歷史多模態快照已就緒：
+                </span>
+                <span className="text-xs text-indigo-700 bg-indigo-50 px-3 py-0.5 rounded-full font-extrabold border border-indigo-100">
+                  {history.length} 筆已分析大綱
+                </span>
+              </div>
+              <button
+                onClick={() => setIsHistoryOpen(true)}
+                className="flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer whitespace-nowrap self-end sm:self-auto"
+                id="btn-toggle-history-sidebar-on"
+              >
+                <History className="h-3.5 w-3.5 text-white" />
+                <span>展開歷史紀錄 ◀</span>
+              </button>
+            </div>
+          )}
+
           {/* Quick Trigger to launch new analysis whilst observing results */}
           {activeResult && !isLoading && (
             <div className="flex items-center justify-between bg-white p-4.5 rounded-2xl border border-slate-100 shadow-xs">

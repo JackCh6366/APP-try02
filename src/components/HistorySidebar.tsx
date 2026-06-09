@@ -8,6 +8,7 @@ interface HistorySidebarProps {
   onSelect: (id: string) => void;
   onDelete: (id: string, e: React.MouseEvent) => void;
   onClearAll: () => void;
+  onClose?: () => void;
 }
 
 export default function HistorySidebar({
@@ -16,9 +17,11 @@ export default function HistorySidebar({
   onSelect,
   onDelete,
   onClearAll,
+  onClose,
 }: HistorySidebarProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [filterType, setFilterType] = useState<string>("all");
+  const [isConfirmingClear, setIsConfirmingClear] = useState(false);
 
   const filteredHistory = history.filter((item) => {
     const matchesSearch = item.title.toLowerCase().includes(searchTerm.toLowerCase());
@@ -79,19 +82,58 @@ export default function HistorySidebar({
             <History className="h-5 w-5 text-slate-700" />
             <h2 className="text-base font-bold text-slate-900">歷史紀錄</h2>
           </div>
-          {history.length > 0 && (
-            <button
-              onClick={() => {
-                if (window.confirm("確定要刪除所有歷史記錄嗎？此步驟無法復原。")) {
-                  onClearAll();
-                }
-              }}
-              className="text-xs text-rose-500 hover:text-rose-700 font-medium hover:underline p-1"
-              id="clear-all-history-button"
-            >
-              清除全部
-            </button>
-          )}
+          <div className="flex items-center space-x-1.5">
+            {history.length > 0 && (
+              <>
+                {isConfirmingClear ? (
+                  <span className="flex items-center space-x-1.5 text-[10px] bg-rose-50 border border-rose-100 text-rose-600 rounded-lg px-2 py-0.5 mr-1 font-bold">
+                    <button
+                      onClick={() => {
+                        onClearAll();
+                        setIsConfirmingClear(false);
+                      }}
+                      className="hover:text-rose-800 hover:underline cursor-pointer"
+                      id="confirm-clear-yes"
+                    >
+                      確認清除
+                    </button>
+                    <span className="text-rose-200">|</span>
+                    <button
+                      onClick={() => setIsConfirmingClear(false)}
+                      className="text-slate-400 hover:text-slate-600 font-semibold cursor-pointer"
+                      id="confirm-clear-no"
+                    >
+                      取消
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setIsConfirmingClear(true);
+                      // 4 秒後自動恢復原狀
+                      setTimeout(() => {
+                        setIsConfirmingClear(false);
+                      }, 4000);
+                    }}
+                    className="text-[11px] text-rose-500 hover:text-rose-700 font-bold hover:underline p-1 border-r border-slate-200 pr-2 mr-1 cursor-pointer"
+                    id="clear-all-history-button"
+                  >
+                    清除全部
+                  </button>
+                )}
+              </>
+            )}
+            {onClose && (
+              <button
+                onClick={onClose}
+                className="text-[11px] text-slate-500 hover:text-slate-800 font-bold bg-slate-100 hover:bg-slate-200 px-2 py-0.5 rounded-md transition-all flex items-center"
+                id="close-history-sidebar-inline"
+                title="收起歷史紀錄"
+              >
+                <span>收合 ◀</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Search */}
