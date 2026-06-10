@@ -1,164 +1,3 @@
-
-Claude finished the response
-JackCh6366/APP-try02
-main
-
-GITHUB
-
-我想知道為什麼我這個專案透過網址連結時出來的資料會很少，是不是被限制了
-我放的連結是這個進行測試
-
-下午2:24
-你好！我看到你分享的問題，但你的訊息似乎沒有完整帶上測試連結的網址。你可以再把那個連結貼一次嗎？
-
-另外，先就程式碼幫你分析一下**「網址連結模式資料很少」的可能原因**：
-
-在 api/generate.ts 裡的 getLinkContext 函數有幾個限制：
-
-YouTube 的部分：
-
-只抓 oembed 的標題和頻道名稱
-字幕（transcript）依賴 youtube-transcript 套件，但很多影片沒開放字幕，或 YouTube 反爬機制會讓它失敗，此時 fallback 是空的
-一般網頁的部分：
-
-只抓 <title> 和 <meta description>，內容本來就很簡短
-伺服器端 fetch 常被 YouTube 等平台擋掉（403/bot 偵測）
-根本問題： 這個 link 模式設計上不是真的「聽」影片音訊，而是靠字幕文字 + 網頁 meta 資訊讓 AI 推斷，如果字幕抓不到，AI 能參考的資訊就極少。
-
-把測試連結貼過來，我可以更具體告訴你是哪個環節卡住，以及怎麼改善。
-
-https://www.youtube.com/watch?v=HH38TftSPII
-
-下午2:24
-讓我先搜尋這個影片的資訊來了解內容。
-
-
-Searched the web
-Searched the web
-搜尋沒有直接找到這部影片的資訊，讓我直接嘗試抓取這個 YouTube 頁面。
-
-
-Fetched: 來台14年的真心話💗從追夢的留學生到專業的土木工程師👷🏾‍♂️我用雙手建設我愛的台灣❤️【哇係黑龍】Building Taiwan: My 14-Year Dream Journey
-Fetched: 來台14年的真心話💗從追夢的留學生到專業的土木工程師👷🏾‍♂️我用雙手建設我愛的台灣❤️【哇係黑龍】Building Taiwan: My 14-Year Dream Journey
-好的，影片資訊拿到了！這是「哇係黑龍」頻道的影片，來台14年的真心話，一位從甘比亞來台的土木工程師的故事。
-
-現在針對你的問題，為什麼這個影片用網址連結模式抓到的資料很少，原因很明確：
-
-問題根源分析
-這部影片具體碰到的狀況
-YouTube 字幕抓取失敗的機率很高：
-
-這部影片才剛上架（12小時前），YouTube 的自動字幕生成需要時間
-影片內容是台語/中文/甘比亞口音混合，youtube-transcript 套件對這類影片字幕抓取穩定性差
-YouTube 近年對 transcript API 有反爬限制，伺服器端直接抓常被擋
-你的程式碼裡 getLinkContext 最終傳給 AI 的資料只有：
-
-影片標題 + 頻道名稱 + meta description（如果有抓到）
-字幕若是空的，AI 能發揮的空間就極度有限。
-
-解決方案（三個選項）
-方案一：改用 Gemini 原生 URL 支援（推薦）
-Gemini 2.5 Flash 本身支援直接傳入 YouTube URL 讓它自己處理，不需要你先抓字幕：
-
-typescript
-// 修改 buildGeminiContents，link 模式改為：
-if (body.mediaType === "link") {
-  return [
-    {
-      fileData: {
-        fileUri: body.videoLink,  // 直接給 YouTube URL
-        mimeType: "video/youtube"
-      }
-    },
-    { text: "Analyze this video." }
-  ];
-}
-這樣 Gemini 會直接聽影片音訊，不是靠字幕推斷，效果完全不同。
-
-方案二：加上 YouTube Data API v3 抓更完整的 metadata
-目前只用 oembed，可改用官方 API 抓 description、tags 等更豐富資訊：
-
-typescript
-const ytApiUrl = `https://www.googleapis.com/youtube/v3/videos?id=${videoId}&part=snippet&key=${process.env.YOUTUBE_API_KEY}`;
-但這只是補充 metadata，不是真正的音訊內容，仍是治標。
-
-方案三：給 AI 更明確的 fallback 指示
-在 prompt 裡加一段，當字幕不足時要 AI 根據標題和描述做推斷並說明限制，而非產出空洞的結果：
-
-typescript
-// buildSystemInstruction 裡加入：
-`If transcript is empty or very short, clearly state the limitation and do your best analysis based on available title/description metadata only.`
-建議優先做方案一
-你的 stack 已經用 Gemini，直接讓 Gemini 讀 YouTube URL 是最乾淨的解法，不需要額外 API key，效果也最好。要我幫你把修改後的完整 buildGeminiContents 函數寫出來嗎？
-
-好,麻煩你幫我改改看
-
-下午2:26
-好的，先看一下現有的 api/generate.ts 相關部分，然後幫你修改。
-
-
-查看 generate.ts 的 buildGeminiContents 函數
-查看 generate.ts 的 buildGeminiContents 函數
-檔案是在對話文件中，讓我直接根據你貼的程式碼來寫修改版本。
-
-
-Read the frontend design skill
-Read the frontend design skill
-好，現在來幫你寫修改後的完整 api/generate.ts：
-
-
-Created a file, read a file
-Created a file, read a file
-這是修改好的 api/generate.ts，把它直接覆蓋你專案裡的同名檔案即可。
-
-改了什麼
-核心變更：buildGeminiContents 裡的 link 模式
-
-舊版：抓 oembed 標題 + youtube-transcript 字幕 → 文字餵給 AI
-新版：YouTube URL → 直接用 fileData.fileUri 讓 Gemini 原生聽音訊
-具體邏輯：
-
-連結類型	Gemini	NVIDIA
-YouTube URL	fileData.fileUri 直接讀音訊 ✅	fallback 抓字幕（文字模型限制）
-一般網址	原本 meta + 字幕邏輯不變	同左
-同時重構的部分：
-
-getLinkContext 拆成 getNonYoutubeLinkContext，只給非 YouTube 或 NVIDIA fallback 用
-新增 isYoutubeUrl() 判斷函數，邏輯更清晰
-NVIDIA 的 YouTube 處理維持字幕 fallback（它是純文字模型，無法讀影片）
-使用注意
-測試的影片 HH38TftSPII 是12小時前剛上架，Gemini 讀 YouTube URL 需要影片是公開且可存取的，這部影片應該沒問題。如果遇到私人影片或地區限制，Gemini 會回傳錯誤，你可以在 catch 裡再加一層 fallback 到字幕模式。
-
-
-Generate
-TS 
-我需要調整什麼嗎,還是直接可以上傳?
-
-下午2:30
-直接用就可以，只需要把剛才下載的 generate.ts 放到你專案的 api/ 資料夾裡覆蓋原本的檔案，不需要改任何其他設定。
-
-確認清單：
-
-項目	狀態
-需要新增 API Key	❌ 不需要，原本的 GEMINI_API_KEY 就夠
-需要安裝新套件	❌ 不需要，@google/genai 已經在你的 package.json 裡
-需要改 vite.config.ts	❌ 不需要
-需要改前端程式碼	❌ 不需要
-需要改 .env	❌ 不需要
-步驟就只有一個：
-
-把下載的 generate.ts 複製到 api/generate.ts，覆蓋原檔，然後重新啟動 npm run dev 就好了。
-
-測完之後如果有任何問題再告訴我！
-
-
-You've used 90% of your session limit
-
-
-
-
-Claude is AI and can make mistakes. Please double-check responses.
-Generate · TS
 import { GoogleGenAI, Type } from "@google/genai";
 import { YoutubeTranscript } from "youtube-transcript";
  
@@ -174,8 +13,8 @@ interface GenerateBody {
   textTranscript?: string;
   videoLink?: string;
   options?: {
-    depth?: "quick" | "detailed" | "mindmap";
-    primaryGoal?: "takeaways" | "actions" | "full-transcript";
+    depth?: "quick" | "detailed";
+    primaryGoal?: "takeaways" | "actions";
     targetLanguages?: string[];
   };
 }
@@ -274,7 +113,19 @@ async function getNonYoutubeLinkContext(videoLink: string) {
 function buildSystemInstruction(body: GenerateBody) {
   const { depth = "detailed", primaryGoal = "takeaways", targetLanguages = ["zh", "en"] } = body.options || {};
  
-  return `You are an elite multilingual media transcriptionist, content analyst, and translator.
+  // 根據 depth 決定產出要求
+  const depthInstruction =
+    depth === "quick"
+      ? "Produce a concise but complete summary. All text fields combined should be at least 3000 Traditional Chinese characters."
+      : "Produce an EXTREMELY DETAILED and COMPREHENSIVE analysis. ALL text fields combined MUST reach at least 10000 Traditional Chinese characters. Every segment summary should be at least 300 characters. The summaryText should be at least 800 characters. Each translation should be at least 2000 characters. Do NOT truncate or summarize briefly — expand every point with full context, background, examples and reasoning.";
+ 
+  // 根據 primaryGoal 決定重點方向
+  const goalInstruction =
+    primaryGoal === "actions"
+      ? "Focus on extracting ALL actionable items, decisions, next steps, responsibilities and deadlines mentioned. Each actionItem should be a complete sentence with full context."
+      : "Focus on extracting ALL key knowledge points, insights, concepts and takeaways. Each keyConcept should include a brief explanation of why it matters.";
+ 
+  return `You are an elite multilingual media transcriptionist, content analyst, and translator with exceptional attention to detail.
  
 !!CRITICAL LANGUAGE REQUIREMENT — MUST FOLLOW WITHOUT EXCEPTION!!
 - ALL output fields including title, transcript, summaryText, every segment title and summary, every keyConcept, and every actionItem MUST be written EXCLUSIVELY in Traditional Chinese (繁體中文).
@@ -283,6 +134,22 @@ function buildSystemInstruction(body: GenerateBody) {
 - Even if the source media is in Mandarin (Simplified Chinese), Cantonese, English, Japanese, or any other language — you MUST still write ALL non-translation fields in Traditional Chinese (繁體中文).
 - The translations.zh field must also be written in Traditional Chinese (繁體中文), NOT Simplified Chinese.
 - Double-check every character you output. If you are unsure whether a character is Traditional or Simplified, choose the Traditional form.
+ 
+!!CRITICAL OUTPUT LENGTH REQUIREMENT!!
+${depthInstruction}
+- segments array MUST contain at least 8 items for detailed depth, each with a thorough summary.
+- keyConcepts MUST contain at least 15 items, each being a complete phrase or short explanation (not just a single word).
+- actionItems MUST contain at least 10 items if any are present in the content.
+- translations for each selected language MUST be complete, polished Markdown with headers, bullet points, and full explanations — NOT a brief summary.
+- NEVER cut content short. If you are running long, continue until all fields are complete and thorough.
+ 
+!!CONTENT AVAILABILITY CHECK!!
+- If the media content is inaccessible, private, region-locked, or has insufficient information to analyze:
+  Set summaryText to exactly: "【內容無法順利取得】此影音連結目前無法正常存取或內容資訊不足，請確認連結是否為公開影片，或嘗試更換其他連結後重新分析。"
+  Set transcript to the same error message.
+  Set all segment summaries to the same error message.
+  Set translations.zh to the same error message in Markdown format.
+  Do NOT fabricate or guess content. Do NOT produce placeholder analysis.
  
 Return only valid JSON that matches this shape:
 {
@@ -299,22 +166,23 @@ Return only valid JSON that matches this shape:
 Field-by-field language rules (STRICTLY FOLLOW EACH ONE):
 - title → 繁體中文 Traditional Chinese only
 - originalLanguage → 繁體中文 description of the detected source language (e.g. 英文、日文、韓文、普通話、粵語)
-- transcript → 繁體中文 Traditional Chinese only (translate/transcribe the source into Traditional Chinese)
-- summaryText → 繁體中文 Traditional Chinese only
+- transcript → 繁體中文 Traditional Chinese only (translate/transcribe the source into Traditional Chinese; must be detailed and complete)
+- summaryText → 繁體中文 Traditional Chinese only (comprehensive executive summary, minimum 800 characters)
 - segments[].title → 繁體中文 Traditional Chinese only
-- segments[].summary → 繁體中文 Traditional Chinese only
-- keyConcepts[] → 繁體中文 Traditional Chinese only
-- actionItems[] → 繁體中文 Traditional Chinese only
-- translations.zh → 繁體中文 Traditional Chinese polished Markdown (NOT Simplified Chinese)
-- translations.en → English polished Markdown
-- translations.ja → Japanese (日本語) polished Markdown
-- translations.ko → Korean (한국어) polished Markdown
+- segments[].summary → 繁體中文 Traditional Chinese only (each segment minimum 300 characters, include full context)
+- keyConcepts[] → 繁體中文 Traditional Chinese only (each item should be a concept name plus brief explanation, not just a word)
+- actionItems[] → 繁體中文 Traditional Chinese only (each item should be a complete actionable sentence)
+- translations.zh → 繁體中文 Traditional Chinese polished Markdown — full structured report with ## headers, bullet lists, and complete explanations (NOT Simplified Chinese, minimum 2000 characters)
+- translations.en → English polished Markdown — full structured report (minimum 2000 characters)
+- translations.ja → Japanese (日本語) polished Markdown — full structured report (minimum 2000 characters)
+- translations.ko → Korean (한국어) polished Markdown — full structured report (minimum 2000 characters)
  
-Other requirements:
+Output focus:
+${goalInstruction}
 - Depth level: ${depth}.
 - Primary goal: ${primaryGoal}.
 - Translate the result into these language codes: ${targetLanguages.join(", ")}.
-- If timestamps are unavailable, omit timeRange or use logical section labels.
+- If timestamps are available, include them in timeRange. Otherwise use descriptive section labels like "開場介紹"、"核心論點"、"結論".
 - Do not wrap the JSON in markdown fences.`;
 }
  
@@ -470,6 +338,7 @@ async function generateWithGemini(body: GenerateBody) {
       responseMimeType: "application/json",
       responseSchema,
       temperature: 0.2,
+      maxOutputTokens: 16000,   // 約對應 10000~12000 繁中字
     },
   });
  
@@ -519,7 +388,7 @@ async function generateWithNvidia(body: GenerateBody) {
       ],
       temperature: 0.2,
       top_p: 0.95,
-      max_tokens: 4096,
+      max_tokens: 16000,
       stream: false,
       frequency_penalty: 0,
       presence_penalty: 0,
@@ -580,4 +449,3 @@ export default async function handler(req: any, res: any) {
     });
   }
 }
- 

@@ -1,19 +1,23 @@
-export type SummaryDepth = "quick" | "detailed" | "mindmap";
-export type PrimaryGoal = "takeaways" | "actions" | "full-transcript";
+// 移除 "mindmap"（前端無對應完整輸出）
+export type SummaryDepth = "quick" | "detailed";
+ 
+// 移除 "full-transcript"（前端無對應完整輸出）
+export type PrimaryGoal = "takeaways" | "actions";
+ 
 export type AIProvider = "gemini" | "nvidia";
-
+ 
 export interface SummaryOptions {
   depth: SummaryDepth;
   primaryGoal: PrimaryGoal;
   targetLanguages: string[]; // 'zh' (Traditional Chinese), 'en' (English), 'ja' (Japanese), 'ko' (Korean)
 }
-
+ 
 export interface TopicSection {
   title: string;
   timeRange?: string; // Optional timestamp/range
   summary: string;
 }
-
+ 
 export interface MediaSummaryResult {
   id: string;
   title: string;
@@ -29,7 +33,7 @@ export interface MediaSummaryResult {
   createdAt: string;
   usedModel?: string;
 }
-
+ 
 export interface SummaryHistoryItem {
   id: string;
   title: string;
