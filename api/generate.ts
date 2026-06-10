@@ -189,7 +189,15 @@ ${goalInstruction}
 function buildNvidiaSystemInstruction(body: GenerateBody) {
   return `/no_think
  
-${buildSystemInstruction(body)}`;
+${buildSystemInstruction(body)}
+ 
+!!NVIDIA STRICT JSON RULES — MUST FOLLOW!!
+- Output ONLY a single raw JSON object. No markdown fences. No \`\`\`json. No \`\`\`.
+- ABSOLUTELY NO comments inside JSON. No // comments. No /* */ comments. JSON does not support comments.
+- Do NOT add trailing commas after the last item in any array or object.
+- Every string value must be properly escaped. Use \\n for newlines inside strings, never actual line breaks.
+- Complete the ENTIRE JSON before stopping. Never truncate mid-string or mid-object.
+- If content is very long, shorten individual field values slightly to fit, but ALWAYS close all brackets and braces properly.`;
 }
  
 const responseSchema = {
@@ -338,7 +346,7 @@ async function generateWithGemini(body: GenerateBody) {
       responseMimeType: "application/json",
       responseSchema,
       temperature: 0.2,
-      maxOutputTokens: 16000,   // 約對應 10000~12000 繁中字
+      maxOutputTokens: 32000,   // 繁中每字約 1.5~2 tokens，32000 可容納 15000+ 字
     },
   });
  
@@ -353,17 +361,94 @@ async function generateWithGemini(body: GenerateBody) {
 }
  
 function parseJsonFromModel(content: string) {
-  const trimmed = content.trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+  // Step 1: 移除 markdown 代碼塊包裝
+  let trimmed = content.trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+ 
+  // Step 2: 移除 NVIDIA 常插入的單行註解 (// ...)
+  // 只移除不在字串值內的註解（簡化處理：移除行首或逗號後的 // 註解）
+  trimmed = trimmed.replace(/,?\s*\/\/[^\n"]*/g, "");
+ 
+  // Step 3: 嘗試直接解析
   try {
     return JSON.parse(trimmed);
   } catch {
+    // Step 4: 找到最外層的 { } 範圍
     const start = trimmed.indexOf("{");
     const end = trimmed.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      return JSON.parse(trimmed.slice(start, end + 1));
+ 
+    if (start < 0) {
+      throw new Error("AI 回應中找不到有效的 JSON 結構，請重試。");
     }
-    throw new Error("The AI response was not valid JSON.");
+ 
+    // Step 5: 如果找不到結尾 }，代表被截斷 → 嘗試自動補齊
+    if (end <= start) {
+      const partial = trimmed.slice(start);
+      const repaired = repairTruncatedJson(partial);
+      try {
+        return JSON.parse(repaired);
+      } catch {
+        throw new Error("AI 回應內容過長被截斷，且自動修復失敗。請改用「簡短精華大綱」模式，或減少選取的翻譯語系後重試。");
+      }
+    }
+ 
+    // Step 6: 有頭有尾但還是解析失敗 → 嘗試修復後解析
+    const candidate = trimmed.slice(start, end + 1);
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      const repaired = repairTruncatedJson(candidate);
+      try {
+        return JSON.parse(repaired);
+      } catch {
+        throw new Error("AI 回應格式異常，無法解析為有效 JSON。請重試一次。");
+      }
+    }
   }
+}
+ 
+/**
+ * 嘗試修復被截斷的 JSON 字串：
+ * - 補上未關閉的字串引號
+ * - 補上未關閉的陣列 ]
+ * - 補上未關閉的物件 }
+ */
+function repairTruncatedJson(partial: string): string {
+  let s = partial;
+ 
+  // 移除尾端的逗號（trailing comma）
+  s = s.replace(/,\s*$/, "");
+ 
+  // 計算未關閉的引號（奇數個 " 代表字串沒關閉）
+  const quoteCount = (s.match(/(?<!\\)"/g) || []).length;
+  if (quoteCount % 2 !== 0) {
+    s += '"'; // 補上關閉引號
+  }
+ 
+  // 計算未關閉的括號層數
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let inString = false;
+ 
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const prev = i > 0 ? s[i - 1] : "";
+    if (ch === '"' && prev !== "\\") inString = !inString;
+    if (!inString) {
+      if (ch === "{") braceDepth++;
+      else if (ch === "}") braceDepth--;
+      else if (ch === "[") bracketDepth++;
+      else if (ch === "]") bracketDepth--;
+    }
+  }
+ 
+  // 補上缺少的關閉括號
+  s += "]".repeat(Math.max(0, bracketDepth));
+  s += "}".repeat(Math.max(0, braceDepth));
+ 
+  return s;
 }
  
 async function generateWithNvidia(body: GenerateBody) {
@@ -388,7 +473,7 @@ async function generateWithNvidia(body: GenerateBody) {
       ],
       temperature: 0.2,
       top_p: 0.95,
-      max_tokens: 16000,
+      max_tokens: 12000,  // NVIDIA 模型實際穩定上限，超過易截斷或亂格式
       stream: false,
       frequency_penalty: 0,
       presence_penalty: 0,
