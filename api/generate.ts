@@ -331,6 +331,24 @@ async function buildNvidiaPrompt(body: GenerateBody) {
   throw new Error("Please choose an input type.");
 }
  
+// flash-lite 超出範圍時自動升級用此模型
+const GEMINI_FALLBACK_MODEL = "gemini-2.5-flash";
+ 
+async function callGeminiModel(ai: GoogleGenAI, model: string, body: GenerateBody) {
+  const contents = await buildGeminiContents(body);
+  return await ai.models.generateContent({
+    model,
+    contents,
+    config: {
+      systemInstruction: buildSystemInstruction(body),
+      responseMimeType: "application/json",
+      responseSchema,
+      temperature: 0.2,
+      maxOutputTokens: 65536,
+    },
+  });
+}
+ 
 async function generateWithGemini(body: GenerateBody) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -338,26 +356,46 @@ async function generateWithGemini(body: GenerateBody) {
   }
  
   const ai = new GoogleGenAI({ apiKey });
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: await buildGeminiContents(body),
-    config: {
-      systemInstruction: buildSystemInstruction(body),
-      responseMimeType: "application/json",
-      responseSchema,
-      temperature: 0.2,
-      maxOutputTokens: 32000,   // 繁中每字約 1.5~2 tokens，32000 可容納 15000+ 字
-    },
-  });
+ 
+  // 第一次：用 flash-lite（較快較省）
+  let usedModel = GEMINI_MODEL;
+  let response = await callGeminiModel(ai, GEMINI_MODEL, body);
  
   if (!response.text) {
     throw new Error("Gemini returned an empty response.");
   }
  
-  return {
-    result: JSON.parse(response.text.trim()),
-    usedModel: GEMINI_MODEL,
-  };
+  // 嘗試解析，若截斷 → 自動升級模型重試
+  let parsed: any;
+  try {
+    parsed = JSON.parse(response.text.trim());
+  } catch (firstErr: any) {
+    const isTruncation =
+      firstErr?.message?.toLowerCase().includes("unterminated") ||
+      firstErr?.message?.toLowerCase().includes("unexpected end") ||
+      (firstErr?.message?.toLowerCase().includes("position") &&
+       firstErr?.message?.toLowerCase().includes("json"));
+ 
+    if (isTruncation) {
+      console.warn(`[Gemini] ${GEMINI_MODEL} 輸出被截斷，自動升級至 ${GEMINI_FALLBACK_MODEL} 重試...`);
+      usedModel = GEMINI_FALLBACK_MODEL;
+      response = await callGeminiModel(ai, GEMINI_FALLBACK_MODEL, body);
+ 
+      if (!response.text) {
+        throw new Error("Gemini fallback model returned an empty response.");
+      }
+ 
+      try {
+        parsed = JSON.parse(response.text.trim());
+      } catch {
+        parsed = parseJsonFromModel(response.text);
+      }
+    } else {
+      parsed = parseJsonFromModel(response.text);
+    }
+  }
+ 
+  return { result: parsed, usedModel };
 }
  
 function parseJsonFromModel(content: string) {
