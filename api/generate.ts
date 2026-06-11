@@ -683,15 +683,12 @@ export default async function handler(req: any, res: any) {
  
       if (code === 503 || status === "UNAVAILABLE" || apiMsg.toLowerCase().includes("high demand")) {
         errorMsg =
-          "⚠️ Gemini API 目前需求量過高（503 UNAVAILABLE）。
-" +
-          "這是 Google 伺服器端的暫時性問題，與你的連結或影片無關。
-" +
+          "⚠️ Gemini API 目前需求量過高（503 UNAVAILABLE）。" +
+          "這是 Google 伺服器端的暫時性問題，與你的連結或影片無關。" +
           "建議：等待 30 秒後重新點擊分析，或切換至 NVIDIA 模型（貼上字幕模式）。";
       } else if (code === 429 || status === "RESOURCE_EXHAUSTED") {
         errorMsg =
-          "⚠️ Gemini API 配額已達上限（429 RESOURCE_EXHAUSTED）。
-" +
+          "⚠️ Gemini API 配額已達上限（429 RESOURCE_EXHAUSTED）。" +
           "請稍候幾分鐘後重試，或切換至 NVIDIA 模型。";
       } else if (apiMsg) {
         errorMsg = `Gemini API 錯誤（${code ?? status}）：${apiMsg}`;
