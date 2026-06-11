@@ -20,6 +20,7 @@ interface GenerateBody {
 }
  
 export const config = {
+  maxDuration: 300, // Vercel Function 最長執行時間（秒）。免費方案上限 60s，Pro 方案可到 300s
   api: {
     bodyParser: {
       sizeLimit: "25mb",
