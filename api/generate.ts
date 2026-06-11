@@ -183,7 +183,9 @@ ${goalInstruction}
 - Primary goal: ${primaryGoal}.
 - Translate the result into these language codes: ${targetLanguages.join(", ")}.
 - If timestamps are available, include them in timeRange. Otherwise use descriptive section labels like "開場介紹"、"核心論點"、"結論".
-- Do not wrap the JSON in markdown fences.`;
+- Do not wrap the JSON in markdown fences.
+- Start your response IMMEDIATELY with { and end with }. No preamble, no explanation, no markdown fences.
+- Every field in the JSON shape above MUST be present. Never omit required fields.`;
 }
  
 function buildNvidiaSystemInstruction(body: GenerateBody) {
@@ -336,17 +338,31 @@ const GEMINI_FALLBACK_MODEL = "gemini-2.5-flash";
  
 async function callGeminiModel(ai: GoogleGenAI, model: string, body: GenerateBody) {
   const contents = await buildGeminiContents(body);
-  return await ai.models.generateContent({
-    model,
-    contents,
-    config: {
-      systemInstruction: buildSystemInstruction(body),
-      responseMimeType: "application/json",
-      responseSchema,
-      temperature: 0.2,
-      maxOutputTokens: 65536,
-    },
-  });
+ 
+  // fileData（YouTube URL）模式：不使用 responseSchema
+  // responseSchema 搭配 fileData 在部分模型版本會導致空回應或格式錯誤
+  // 改為在 prompt 內要求 JSON 格式，由 parseJsonFromModel 處理解析
+  const isFileDataMode =
+    body.mediaType === "link" &&
+    body.videoLink &&
+    (body.videoLink.includes("youtube.com") || body.videoLink.includes("youtu.be"));
+ 
+  const config = isFileDataMode
+    ? {
+        systemInstruction: buildSystemInstruction(body),
+        // 不設 responseMimeType 和 responseSchema，讓模型自由輸出 JSON
+        temperature: 0.2,
+        maxOutputTokens: 65536,
+      }
+    : {
+        systemInstruction: buildSystemInstruction(body),
+        responseMimeType: "application/json",
+        responseSchema,
+        temperature: 0.2,
+        maxOutputTokens: 65536,
+      };
+ 
+  return await ai.models.generateContent({ model, contents, config });
 }
  
 async function generateWithGemini(body: GenerateBody) {
@@ -361,37 +377,80 @@ async function generateWithGemini(body: GenerateBody) {
   let usedModel = GEMINI_MODEL;
   let response = await callGeminiModel(ai, GEMINI_MODEL, body);
  
-  if (!response.text) {
-    throw new Error("Gemini returned an empty response.");
+  // 回應為空：可能是 flash-lite 對 fileData 支援不穩定 → 直接升級重試
+  if (!response.text || response.text.trim().length < 10) {
+    console.warn(`[Gemini] ${GEMINI_MODEL} 回應為空或過短，自動升級至 ${GEMINI_FALLBACK_MODEL} 重試...`);
+    usedModel = GEMINI_FALLBACK_MODEL;
+    response = await callGeminiModel(ai, GEMINI_FALLBACK_MODEL, body);
+ 
+    if (!response.text || response.text.trim().length < 10) {
+      throw new Error(
+        `Gemini 兩個模型都回傳了空回應。可能原因：
+` +
+        `1. 影片為私人或地區限制
+` +
+        `2. Gemini API 暫時無法存取此影片
+` +
+        `3. 請稍後重試，或改用「貼上字幕逐字稿」模式`
+      );
+    }
   }
  
-  // 嘗試解析，若截斷 → 自動升級模型重試
+  // 嘗試解析
   let parsed: any;
   try {
     parsed = JSON.parse(response.text.trim());
   } catch (firstErr: any) {
+    const errMsg = firstErr?.message?.toLowerCase() ?? "";
     const isTruncation =
-      firstErr?.message?.toLowerCase().includes("unterminated") ||
-      firstErr?.message?.toLowerCase().includes("unexpected end") ||
-      (firstErr?.message?.toLowerCase().includes("position") &&
-       firstErr?.message?.toLowerCase().includes("json"));
+      errMsg.includes("unterminated") ||
+      errMsg.includes("unexpected end") ||
+      (errMsg.includes("position") && errMsg.includes("json"));
  
     if (isTruncation) {
-      console.warn(`[Gemini] ${GEMINI_MODEL} 輸出被截斷，自動升級至 ${GEMINI_FALLBACK_MODEL} 重試...`);
-      usedModel = GEMINI_FALLBACK_MODEL;
-      response = await callGeminiModel(ai, GEMINI_FALLBACK_MODEL, body);
+      // 截斷：若還沒升級過，升級後重試
+      if (usedModel !== GEMINI_FALLBACK_MODEL) {
+        console.warn(`[Gemini] ${GEMINI_MODEL} 輸出被截斷，自動升級至 ${GEMINI_FALLBACK_MODEL} 重試...`);
+        usedModel = GEMINI_FALLBACK_MODEL;
+        response = await callGeminiModel(ai, GEMINI_FALLBACK_MODEL, body);
  
-      if (!response.text) {
-        throw new Error("Gemini fallback model returned an empty response.");
-      }
+        if (!response.text) {
+          throw new Error("Gemini fallback model returned an empty response.");
+        }
  
-      try {
-        parsed = JSON.parse(response.text.trim());
-      } catch {
+        try {
+          parsed = JSON.parse(response.text.trim());
+        } catch {
+          // fallback 也截斷，嘗試自動修復
+          parsed = parseJsonFromModel(response.text);
+        }
+      } else {
+        // 已經是 fallback 還截斷，嘗試修復
         parsed = parseJsonFromModel(response.text);
       }
     } else {
-      parsed = parseJsonFromModel(response.text);
+      // 非截斷的解析錯誤：印出實際內容幫助診斷，然後嘗試修復
+      const preview = response.text.trim().slice(0, 300);
+      console.error(`[Gemini] JSON 解析失敗，回應前 300 字：${preview}`);
+ 
+      // 若內容看起來完全不是 JSON（沒有 { 開頭）→ 直接給出明確錯誤
+      if (!response.text.trim().startsWith("{") && !response.text.trim().includes("{")) {
+        throw new Error(
+          `Gemini 回傳了非 JSON 格式的內容（模型：${usedModel}）。` +
+          `可能是影片無法存取或內容受限。` +
+          `回應開頭：${preview.slice(0, 100)}`
+        );
+      }
+ 
+      try {
+        parsed = parseJsonFromModel(response.text);
+      } catch (repairErr: any) {
+        throw new Error(
+          `AI 回應格式異常，自動修復失敗（模型：${usedModel}）。` +
+          `請重試一次，或改用「貼上字幕逐字稿」模式。` +
+          `原始錯誤：${firstErr?.message}`
+        );
+      }
     }
   }
  
