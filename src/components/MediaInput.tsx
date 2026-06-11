@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Upload,
   Mic,
@@ -13,6 +13,11 @@ import {
   Link,
   Globe,
   Cpu,
+  Clock,
+  User,
+  AlertTriangle,
+  Loader2,
+  PlayCircle,
 } from "lucide-react";
 import { AIProvider, SummaryOptions, SummaryDepth, PrimaryGoal } from "../types";
 
@@ -56,6 +61,23 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
 
   // Link paste states
   const [videoLink, setVideoLink] = useState("");
+
+  // 影片預覽資訊
+  interface VideoPreview {
+    title: string;
+    channelName: string;
+    thumbnailUrl: string;
+    durationText: string;
+    durationSeconds: number;
+    isPlaylist: boolean;
+    playlistWarning?: string;
+    durationWarning?: string;
+    videoId: string | null;
+  }
+  const [videoPreview, setVideoPreview] = useState<VideoPreview | null>(null);
+  const [isFetchingPreview, setIsFetchingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewDebounceRef = useRef<NodeJS.Timeout | null>(null);
 
   // Transcript Paste states
   const [pastedText, setPastedText] = useState("");
@@ -115,6 +137,50 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
       setFileBase64(result.split(",")[1]);
     };
     reader.readAsDataURL(file);
+  };
+
+  // 自動抓取影片預覽資訊（debounce 800ms）
+  const fetchVideoPreview = useCallback(async (url: string) => {
+    if (!url.trim() || (!url.includes("youtube.com") && !url.includes("youtu.be"))) {
+      setVideoPreview(null);
+      setPreviewError(null);
+      return;
+    }
+    if (!url.startsWith("http://") && !url.startsWith("https://")) return;
+
+    setIsFetchingPreview(true);
+    setPreviewError(null);
+    setVideoPreview(null);
+
+    try {
+      const res = await fetch("/api/video-info", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (data.success && data.info) {
+        setVideoPreview(data.info);
+      } else {
+        setPreviewError("無法取得影片資訊，請確認連結是否正確。");
+      }
+    } catch {
+      setPreviewError("網路連線異常，無法預覽影片資訊。");
+    } finally {
+      setIsFetchingPreview(false);
+    }
+  }, []);
+
+  const handleVideoLinkChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setVideoLink(val);
+    setVideoPreview(null);
+    setPreviewError(null);
+
+    if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+    previewDebounceRef.current = setTimeout(() => {
+      fetchVideoPreview(val);
+    }, 800);
   };
 
   const startRecording = async () => {
@@ -369,25 +435,134 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
                   type="url"
                   placeholder="請貼上完整連結，例如 https://www.youtube.com/watch?v=..."
                   value={videoLink}
-                  onChange={(e) => setVideoLink(e.target.value)}
+                  onChange={handleVideoLinkChange}
                   disabled={isLoading}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50/20 p-4 pr-12 text-sm focus:border-indigo-600 focus:bg-white focus:outline-hidden font-medium transition-all"
+                  className={`w-full rounded-xl border bg-slate-50/20 p-4 pr-12 text-sm focus:bg-white focus:outline-hidden font-medium transition-all ${
+                    videoPreview?.isPlaylist && !videoPreview?.videoId
+                      ? "border-amber-400 focus:border-amber-500"
+                      : videoPreview
+                      ? "border-emerald-400 focus:border-emerald-500"
+                      : "border-slate-200 focus:border-indigo-600"
+                  }`}
                 />
                 <div className="absolute right-4 top-1/2 transform -translate-y-1/2 text-slate-400">
-                  <Link className="h-4 w-4" />
+                  {isFetchingPreview
+                    ? <Loader2 className="h-4 w-4 animate-spin text-indigo-500" />
+                    : videoPreview
+                    ? <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    : <Link className="h-4 w-4" />
+                  }
                 </div>
               </div>
             </div>
-            <div className="flex items-start space-x-2.5 rounded-xl bg-indigo-50/40 border border-indigo-100 p-4 text-xs text-indigo-800">
-              <Globe className="h-4.5 w-4.5 text-indigo-500 shrink-0 mt-0.5" />
-              <div className="space-y-1 font-medium">
-                <p className="font-bold">🌐 YouTube 直接音訊分析模式</p>
-                <p className="text-slate-600 leading-normal">
-                  YouTube 連結會由 Gemini 直接讀取影片音訊進行分析，不依賴字幕，準確度更高。
-                  若連結為私人影片、地區限制或無法存取，系統會顯示明確錯誤提示。
-                </p>
+
+            {/* 載入中提示 */}
+            {isFetchingPreview && (
+              <div className="flex items-center space-x-2 text-xs text-slate-500 px-1">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" />
+                <span>正在取得影片資訊...</span>
               </div>
-            </div>
+            )}
+
+            {/* 預覽錯誤 */}
+            {previewError && !isFetchingPreview && (
+              <div className="flex items-center space-x-2 rounded-lg bg-rose-50 border border-rose-100 p-3 text-xs text-rose-700">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>{previewError}</span>
+              </div>
+            )}
+
+            {/* 播放清單警告（無法分析整個清單） */}
+            {videoPreview?.isPlaylist && !videoPreview?.videoId && !isFetchingPreview && (
+              <div className="flex items-start space-x-2.5 rounded-xl bg-amber-50 border border-amber-200 p-4 text-xs text-amber-800">
+                <AlertTriangle className="h-4.5 w-4.5 text-amber-500 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-bold">⚠️ 播放清單連結無法直接分析</p>
+                  <p className="leading-normal">{videoPreview.playlistWarning}</p>
+                  <p className="text-amber-600 font-semibold mt-1">
+                    請從播放清單中點開單一影片，複製該影片的網址後貼上。
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* 影片資訊預覽卡片 */}
+            {videoPreview && videoPreview.videoId && !isFetchingPreview && (
+              <div className="rounded-xl border border-slate-200 bg-white shadow-xs overflow-hidden">
+                <div className="flex items-stretch gap-0">
+                  {/* 縮圖 */}
+                  {videoPreview.thumbnailUrl && (
+                    <div className="relative shrink-0 w-32 sm:w-40 bg-slate-100">
+                      <img
+                        src={videoPreview.thumbnailUrl}
+                        alt={videoPreview.title}
+                        className="w-full h-full object-cover"
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                      />
+                      {/* 時長標籤 */}
+                      {videoPreview.durationSeconds > 0 && (
+                        <div className="absolute bottom-1.5 right-1.5 bg-black/80 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded">
+                          {videoPreview.durationText}
+                        </div>
+                      )}
+                      <div className="absolute inset-0 flex items-center justify-center opacity-60">
+                        <PlayCircle className="h-8 w-8 text-white drop-shadow-md" />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 資訊 */}
+                  <div className="flex-1 p-3.5 space-y-2 min-w-0">
+                    <h4 className="text-sm font-bold text-slate-900 leading-snug line-clamp-2">
+                      {videoPreview.title}
+                    </h4>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                      {videoPreview.channelName && (
+                        <span className="flex items-center space-x-1">
+                          <User className="h-3 w-3" />
+                          <span>{videoPreview.channelName}</span>
+                        </span>
+                      )}
+                      {videoPreview.durationSeconds > 0 && (
+                        <span className="flex items-center space-x-1">
+                          <Clock className="h-3 w-3" />
+                          <span>{videoPreview.durationText}</span>
+                        </span>
+                      )}
+                    </div>
+
+                    {/* 播放清單提示（有影片ID但帶有list參數） */}
+                    {videoPreview.isPlaylist && videoPreview.videoId && (
+                      <div className="flex items-start space-x-1.5 text-[10px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5">
+                        <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+                        <span>{videoPreview.playlistWarning}</span>
+                      </div>
+                    )}
+
+                    {/* 時長警告 */}
+                    {videoPreview.durationWarning && (
+                      <div className="flex items-start space-x-1.5 text-[10px] text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2.5 py-1.5">
+                        <Clock className="h-3 w-3 shrink-0 mt-0.5" />
+                        <span>{videoPreview.durationWarning}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 說明文字（無預覽時顯示） */}
+            {!videoPreview && !isFetchingPreview && !previewError && (
+              <div className="flex items-start space-x-2.5 rounded-xl bg-indigo-50/40 border border-indigo-100 p-4 text-xs text-indigo-800">
+                <Globe className="h-4 w-4 text-indigo-500 shrink-0 mt-0.5" />
+                <div className="space-y-1 font-medium">
+                  <p className="font-bold">🌐 YouTube 直接音訊分析模式</p>
+                  <p className="text-slate-600 leading-normal">
+                    貼上 YouTube 連結後會自動預覽影片資訊。Gemini 將直接讀取影片音訊分析，準確度更高，不依賴字幕。
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
