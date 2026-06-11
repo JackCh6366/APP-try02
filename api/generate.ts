@@ -336,6 +336,52 @@ async function buildNvidiaPrompt(body: GenerateBody) {
 // flash-lite 超出範圍時自動升級用此模型
 const GEMINI_FALLBACK_MODEL = "gemini-2.5-flash";
  
+// 等待 ms 毫秒
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+ 
+// 判斷是否為 503 / 429 過載錯誤
+function isOverloadError(err: any): boolean {
+  const msg = JSON.stringify(err?.message ?? err ?? "").toLowerCase();
+  return (
+    msg.includes("503") ||
+    msg.includes("unavailable") ||
+    msg.includes("429") ||
+    msg.includes("quota") ||
+    msg.includes("high demand") ||
+    msg.includes("rate limit") ||
+    msg.includes("resource_exhausted")
+  );
+}
+ 
+// 帶自動重試的 Gemini 呼叫（503/429 時最多重試 3 次，間隔 5s / 10s / 20s）
+async function callGeminiWithRetry(
+  ai: GoogleGenAI,
+  model: string,
+  body: GenerateBody,
+  maxRetries = 3
+) {
+  const delays = [5000, 10000, 20000];
+  let lastErr: any;
+ 
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await callGeminiModel(ai, model, body);
+    } catch (err: any) {
+      lastErr = err;
+      if (isOverloadError(err) && attempt < maxRetries) {
+        const wait = delays[attempt] ?? 20000;
+        console.warn(
+          `[Gemini] API 過載（第 ${attempt + 1} 次），${wait / 1000} 秒後重試...`
+        );
+        await sleep(wait);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+ 
 async function callGeminiModel(ai: GoogleGenAI, model: string, body: GenerateBody) {
   const contents = await buildGeminiContents(body);
  
@@ -375,13 +421,13 @@ async function generateWithGemini(body: GenerateBody) {
  
   // 第一次：用 flash-lite（較快較省）
   let usedModel = GEMINI_MODEL;
-  let response = await callGeminiModel(ai, GEMINI_MODEL, body);
+  let response = await callGeminiWithRetry(ai, GEMINI_MODEL, body);
  
   // 回應為空：可能是 flash-lite 對 fileData 支援不穩定 → 直接升級重試
   if (!response.text || response.text.trim().length < 10) {
     console.warn(`[Gemini] ${GEMINI_MODEL} 回應為空或過短，自動升級至 ${GEMINI_FALLBACK_MODEL} 重試...`);
     usedModel = GEMINI_FALLBACK_MODEL;
-    response = await callGeminiModel(ai, GEMINI_FALLBACK_MODEL, body);
+    response = await callGeminiWithRetry(ai, GEMINI_FALLBACK_MODEL, body);
  
     if (!response.text || response.text.trim().length < 10) {
       throw new Error(
@@ -412,7 +458,7 @@ async function generateWithGemini(body: GenerateBody) {
       if (usedModel !== GEMINI_FALLBACK_MODEL) {
         console.warn(`[Gemini] ${GEMINI_MODEL} 輸出被截斷，自動升級至 ${GEMINI_FALLBACK_MODEL} 重試...`);
         usedModel = GEMINI_FALLBACK_MODEL;
-        response = await callGeminiModel(ai, GEMINI_FALLBACK_MODEL, body);
+        response = await callGeminiWithRetry(ai, GEMINI_FALLBACK_MODEL, body);
  
         if (!response.text) {
           throw new Error("Gemini fallback model returned an empty response.");
@@ -625,9 +671,38 @@ export default async function handler(req: any, res: any) {
     const output = provider === "gemini" ? await generateWithGemini(body) : await generateWithNvidia(body);
     return sendJson(res, 200, { success: true, ...output });
   } catch (error: any) {
+    // 將 503 / 429 過載錯誤轉為使用者看得懂的中文提示
+    let errorMsg: string = error?.message || "AI 分析失敗，請稍後重試。";
+ 
+    try {
+      // 嘗試解析 JSON 格式的錯誤訊息
+      const maybeJson = JSON.parse(errorMsg);
+      const code = maybeJson?.error?.code ?? maybeJson?.code;
+      const status = maybeJson?.error?.status ?? maybeJson?.status ?? "";
+      const apiMsg = maybeJson?.error?.message ?? maybeJson?.message ?? "";
+ 
+      if (code === 503 || status === "UNAVAILABLE" || apiMsg.toLowerCase().includes("high demand")) {
+        errorMsg =
+          "⚠️ Gemini API 目前需求量過高（503 UNAVAILABLE）。
+" +
+          "這是 Google 伺服器端的暫時性問題，與你的連結或影片無關。
+" +
+          "建議：等待 30 秒後重新點擊分析，或切換至 NVIDIA 模型（貼上字幕模式）。";
+      } else if (code === 429 || status === "RESOURCE_EXHAUSTED") {
+        errorMsg =
+          "⚠️ Gemini API 配額已達上限（429 RESOURCE_EXHAUSTED）。
+" +
+          "請稍候幾分鐘後重試，或切換至 NVIDIA 模型。";
+      } else if (apiMsg) {
+        errorMsg = `Gemini API 錯誤（${code ?? status}）：${apiMsg}`;
+      }
+    } catch {
+      // errorMsg 不是 JSON，維持原始訊息
+    }
+ 
     return sendJson(res, 500, {
       success: false,
-      error: error?.message || "AI generation failed.",
+      error: errorMsg,
     });
   }
 }
