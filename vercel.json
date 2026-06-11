@@ -1,8 +1,7 @@
-
 {
   "functions": {
     "api/generate.ts": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "api/video-info.ts": {
       "maxDuration": 15
