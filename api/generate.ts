@@ -617,7 +617,7 @@ async function generateWithNvidia(body: GenerateBody) {
       ],
       temperature: 0.2,
       top_p: 0.95,
-      max_tokens: 100000,  // NVIDIA 模型實際穩定上限，超過易截斷或亂格式
+      max_tokens: 65000,  // NVIDIA 模型實際穩定上限，超過易截斷或亂格式
       stream: false,
       frequency_penalty: 0,
       presence_penalty: 0,
