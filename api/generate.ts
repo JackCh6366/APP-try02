@@ -199,7 +199,7 @@ Always include the Traditional Chinese summary in "summaryText".`;
 // Gemini API call (native fetch, no SDK — Vercel-safe)
 // 若新模型 400 失敗（例如帳號尚未開通該模型權限），自動降級到穩定版本重試一次
 // ─────────────────────────────────────────────────────────────────────────────
-const GEMINI_MODEL_PRIMARY = "gemini-3.1-flash-lite";
+const GEMINI_MODEL_PRIMARY = "gemini-2.5-flash"; // 暫時改回穩定版本，3.1-flash-lite 在 YouTube 連結路徑出現 400 錯誤待查
 const GEMINI_MODEL_FALLBACK = "gemini-2.5-flash";
 
 async function callGeminiModel(

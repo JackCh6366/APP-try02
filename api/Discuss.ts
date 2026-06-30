@@ -120,7 +120,7 @@ function parseDiscussJson(rawText: string): any {
 // Gemini 討論呼叫（與 generate.ts 的 callGemini 同樣使用原生 fetch REST API）
 // ─────────────────────────────────────────────────────────────────────────────
 async function discussWithGemini(body: DiscussBody, apiKey: string): Promise<any> {
-  const MODEL = "gemini-3.1-flash-lite";
+  const MODEL = "gemini-2.5-flash"; // 與 generate.ts 保持一致，暫時改回穩定版本
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
 
   const prompt = buildUserPrompt(body);
