@@ -661,7 +661,7 @@ async function generateWithNvidia(body: GenerateBody) {
       stream: false,
       frequency_penalty: 0,
       presence_penalty: 0,
-      extra_body: { chat_template_kwargs: { enable_thinking: !isAudioInput } },
+      chat_template_kwargs: { enable_thinking: !isAudioInput },
     }),
   });
  
