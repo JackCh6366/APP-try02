@@ -3,7 +3,8 @@ import Header from "./components/Header";
 import HistorySidebar from "./components/HistorySidebar";
 import MediaInput from "./components/MediaInput";
 import SummaryResult from "./components/SummaryResult";
-import { AIProvider, MediaSummaryResult, SummaryHistoryItem } from "./types";
+import { AIProvider, MediaSummaryResult, SummaryHistoryItem, LocalModelConfig } from "./types";
+import { generateWithLocalModel } from "./lib/localProvider";
 import { Sparkles, FileVideo, PlusCircle, AlertCircle, FileText, Globe, History } from "lucide-react";
 
 export default function App() {
@@ -141,37 +142,59 @@ export default function App() {
     textTranscript?: string;
     videoLink?: string;
     options: any;
+    localConfig?: LocalModelConfig;
   }) => {
     setIsLoading(true);
     setError(null);
 
     try {
-      const response = await fetch("/api/generate", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
+      let geminiResult: any;
+      let usedModelName: string;
 
-      const responseText = await response.text();
-      let data: any = {};
+      if (payload.provider === "local") {
+        // ── 本地模型：完全在瀏覽器端執行，不經過 Vercel 後端 ──
+        if (!payload.localConfig) throw new Error("缺少本地模型連線設定");
+        if (!payload.textTranscript) throw new Error("本地模型僅支援文字輸入（文字稿貼上）");
 
-      if (responseText.trim()) {
-        try {
-          data = JSON.parse(responseText);
-        } catch {
-          throw new Error(`API returned a non-JSON response (${response.status}). ${responseText.slice(0, 200)}`);
+        const localResult = await generateWithLocalModel({
+          config: payload.localConfig,
+          textTranscript: payload.textTranscript,
+          options: payload.options,
+        });
+
+        geminiResult = localResult;
+        usedModelName = `本地模型・${payload.localConfig.modelName}`;
+      } else {
+        // ── Gemini / NVIDIA：照舊呼叫 Vercel 後端 ──
+        const response = await fetch("/api/generate", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+
+        const responseText = await response.text();
+        let data: any = {};
+
+        if (responseText.trim()) {
+          try {
+            data = JSON.parse(responseText);
+          } catch {
+            throw new Error(`API returned a non-JSON response (${response.status}). ${responseText.slice(0, 200)}`);
+          }
         }
-      }
 
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || `API returned an empty response (${response.status}). If you are testing locally, run the app with Vercel Dev so /api/generate is available.`);
+        if (!response.ok || !data.success) {
+          throw new Error(data.error || `API returned an empty response (${response.status}). If you are testing locally, run the app with Vercel Dev so /api/generate is available.`);
+        }
+
+        geminiResult = data.result;
+        usedModelName = data.usedModel || (payload.provider === "nvidia" ? "nvidia/llama-3.3-nemotron-super-49b-v1.5" : "gemini-2.5-flash-lite");
       }
 
       // Successful analysis! Register in storage
       const id = `${Date.now()}`;
-      const geminiResult = data.result;
 
       const newResult: MediaSummaryResult = {
         id,
@@ -190,7 +213,7 @@ export default function App() {
         actionItems: geminiResult.actionItems || [],
         translations: geminiResult.translations || {},
         createdAt: new Date().toISOString(),
-        usedModel: data.usedModel || (payload.provider === "nvidia" ? "nvidia/llama-3.3-nemotron-super-49b-v1.5" : "gemini-2.5-flash-lite"),
+        usedModel: usedModelName,
       };
 
       // 1. Save full payload to detail key

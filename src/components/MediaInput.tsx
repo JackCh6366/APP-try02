@@ -19,7 +19,8 @@ import {
   Loader2,
   PlayCircle,
 } from "lucide-react";
-import { AIProvider, SummaryOptions, SummaryDepth, PrimaryGoal } from "../types";
+import { AIProvider, SummaryOptions, SummaryDepth, PrimaryGoal, LocalModelConfig, LocalEngineType, LOCAL_ENGINE_PRESETS } from "../types";
+import { testLocalConnection } from "../lib/localProvider";
 
 interface MediaInputProps {
   onProcess: (payload: {
@@ -31,6 +32,7 @@ interface MediaInputProps {
     textTranscript?: string;
     videoLink?: string;
     options: SummaryOptions;
+    localConfig?: LocalModelConfig;
   }) => void;
   isLoading: boolean;
 }
@@ -43,6 +45,32 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
   const [primaryGoal, setPrimaryGoal] = useState<PrimaryGoal>("takeaways");
   const [targetLanguages, setTargetLanguages] = useState<string[]>(["zh", "en"]);
   const [provider, setProvider] = useState<AIProvider>("gemini");
+
+  // 本地模型（Ollama / LM Studio）連線設定
+  const [localEngineType, setLocalEngineType] = useState<LocalEngineType>("ollama");
+  const [localBaseUrl, setLocalBaseUrl] = useState<string>(LOCAL_ENGINE_PRESETS.ollama.defaultUrl);
+  const [localModelName, setLocalModelName] = useState<string>("");
+  const [localTestStatus, setLocalTestStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [localTestMessage, setLocalTestMessage] = useState<string>("");
+  const [localDetectedModels, setLocalDetectedModels] = useState<string[]>([]);
+
+  const handleTestLocalConnection = async () => {
+    setLocalTestStatus("testing");
+    const result = await testLocalConnection({ engineType: localEngineType, baseUrl: localBaseUrl, modelName: localModelName });
+    setLocalTestStatus(result.ok ? "ok" : "fail");
+    setLocalTestMessage(result.message);
+    setLocalDetectedModels(result.models || []);
+    if (result.ok && result.models && result.models.length > 0 && !localModelName) {
+      setLocalModelName(result.models[0]);
+    }
+  };
+
+  const handleLocalEngineChange = (engine: LocalEngineType) => {
+    setLocalEngineType(engine);
+    setLocalBaseUrl(LOCAL_ENGINE_PRESETS[engine].defaultUrl);
+    setLocalTestStatus("idle");
+    setLocalDetectedModels([]);
+  };
 
   // File Upload states
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -240,6 +268,25 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
   const handleSubmit = async () => {
     const options: SummaryOptions = { depth, primaryGoal, targetLanguages };
 
+    // 本地模型僅支援純文字路徑，上傳/錄音會直接擋下並提示
+    if (provider === "local" && (activeTab === "file" || activeTab === "record")) {
+      alert("本地模型僅支援文字輸入（貼上字幕/逐字稿、或含字幕的 YouTube 連結），請改選其他輸入方式或切換至 Gemini。");
+      return;
+    }
+    if (provider === "local") {
+      if (!localModelName.trim()) {
+        alert("請先輸入或選擇本地模型名稱！");
+        return;
+      }
+      if (localTestStatus !== "ok") {
+        alert("請先點擊「測試連線」確認可以連到你的本地模型伺服器！");
+        return;
+      }
+    }
+
+    const localConfig: LocalModelConfig | undefined =
+      provider === "local" ? { engineType: localEngineType, baseUrl: localBaseUrl, modelName: localModelName } : undefined;
+
     if (activeTab === "file") {
       if (!selectedFile || !fileBase64) {
         alert("請先選擇或拖入影音檔案！");
@@ -267,7 +314,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         alert("請貼上字幕/逐字稿文字內容！");
         return;
       }
-      onProcess({ provider, mediaType: "transcript_paste", textTranscript: pastedText, options });
+      onProcess({ provider, mediaType: "transcript_paste", textTranscript: pastedText, options, localConfig });
     } else if (activeTab === "link") {
       if (!videoLink.trim()) {
         alert("請填寫有效的影片或音訊連結網址！");
@@ -277,7 +324,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         alert("請輸入包含 http:// 或 https:// 的完整網路連結位址！");
         return;
       }
-      onProcess({ provider, mediaType: "link", videoLink: videoLink.trim(), fileName: videoLink.trim(), options });
+      onProcess({ provider, mediaType: "link", videoLink: videoLink.trim(), fileName: videoLink.trim(), options, localConfig });
     }
   };
 
@@ -611,6 +658,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
                 {[
                   { value: "gemini" as AIProvider, label: "Google Gemini", sub: "gemini-2.5-flash-lite" },
                   { value: "nvidia" as AIProvider, label: "NVIDIA", sub: "llama-3.3-nemotron-super-49b-v1.5" },
+                  { value: "local" as AIProvider, label: "本地模型", sub: "Ollama / LM Studio（在你電腦執行）" },
                 ].map(({ value, label, sub }) => (
                   <label key={value} className="flex items-center p-2 rounded-lg bg-white border border-slate-100 hover:border-slate-300 cursor-pointer transition-all">
                     <input type="radio" name="provider" value={value} checked={provider === value} onChange={() => setProvider(value)} disabled={isLoading}
@@ -626,6 +674,66 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
                 <div className="flex items-start space-x-2 text-[10px] text-slate-500 bg-white border border-slate-100 rounded-lg p-2">
                   <Cpu className="h-3.5 w-3.5 shrink-0 mt-0.5" />
                   <span>NVIDIA 為純文字模型，不支援直接上傳音訊，適合貼上字幕文字使用。</span>
+                </div>
+              )}
+              {provider === "local" && (
+                <div className="space-y-2 bg-white border border-slate-100 rounded-lg p-3">
+                  <div className="flex items-start space-x-2 text-[10px] text-slate-500">
+                    <Cpu className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <span>使用你自己電腦上執行的模型，資料不會上傳到雲端。僅支援文字稿輸入（貼上文字 / YouTube 字幕）。</span>
+                  </div>
+
+                  {/* 引擎類型選擇 */}
+                  <div className="flex gap-1.5">
+                    {(["ollama", "lmstudio", "custom"] as LocalEngineType[]).map((eng) => (
+                      <button key={eng} type="button" onClick={() => handleLocalEngineChange(eng)}
+                        className={`flex-1 text-[10px] font-bold py-1.5 rounded-md border transition-all ${localEngineType === eng ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-200 hover:border-slate-400"}`}>
+                        {LOCAL_ENGINE_PRESETS[eng].label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* 連線網址 */}
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">伺服器網址</label>
+                    <input type="text" value={localBaseUrl} onChange={(e) => { setLocalBaseUrl(e.target.value); setLocalTestStatus("idle"); }}
+                      placeholder={LOCAL_ENGINE_PRESETS[localEngineType].defaultUrl}
+                      className="w-full text-[11px] font-mono px-2 py-1.5 border border-slate-200 rounded-md focus:border-slate-900 focus:outline-none" />
+                  </div>
+
+                  {/* 連線測試 */}
+                  <button type="button" onClick={handleTestLocalConnection} disabled={localTestStatus === "testing"}
+                    className="w-full text-[10px] font-bold py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all flex items-center justify-center gap-1.5 disabled:opacity-50">
+                    {localTestStatus === "testing" ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                    測試連線
+                  </button>
+
+                  {localTestStatus !== "idle" && (
+                    <div className={`text-[10px] p-2 rounded-md flex items-start gap-1.5 ${localTestStatus === "ok" ? "bg-emerald-50 text-emerald-700" : localTestStatus === "fail" ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-500"}`}>
+                      {localTestStatus === "ok" && <CheckCircle2 className="h-3 w-3 shrink-0 mt-0.5" />}
+                      {localTestStatus === "fail" && <AlertCircle className="h-3 w-3 shrink-0 mt-0.5" />}
+                      <span>{localTestMessage}</span>
+                    </div>
+                  )}
+
+                  {/* 模型選擇 */}
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">模型名稱</label>
+                    {localDetectedModels.length > 0 ? (
+                      <select value={localModelName} onChange={(e) => setLocalModelName(e.target.value)}
+                        className="w-full text-[11px] font-mono px-2 py-1.5 border border-slate-200 rounded-md focus:border-slate-900 focus:outline-none">
+                        {localDetectedModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    ) : (
+                      <input type="text" value={localModelName} onChange={(e) => setLocalModelName(e.target.value)}
+                        placeholder="例：llama3.1 或 qwen2.5:14b"
+                        className="w-full text-[11px] font-mono px-2 py-1.5 border border-slate-200 rounded-md focus:border-slate-900 focus:outline-none" />
+                    )}
+                  </div>
+
+                  <a href="https://ollama.com" target="_blank" rel="noreferrer" className="block text-[10px] text-slate-400 underline hover:text-slate-600">
+                    還沒安裝 Ollama？點此前往下載
+                  </a>
                 </div>
               )}
             </div>
