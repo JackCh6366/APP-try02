@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// buildGeminiContents - 混合模式 v2（更安全）
-// 優先 fileUri → 失敗自動 fallback 抓字幕
+// buildGeminiContents - 混合模式 v3（Vercel 安全版）
+// 優先 fileUri，失敗時自動走字幕模式
 // ─────────────────────────────────────────────────────────────────────────────
 async function buildGeminiContents(body: GenerateBody) {
   if (body.mediaType === "transcript_paste") {
@@ -17,27 +17,22 @@ async function buildGeminiContents(body: GenerateBody) {
 
     const isYoutube = isYoutubeUrl(body.videoLink);
 
-    // === 1. YouTube 優先嘗試直接聽音訊 ===
+    // YouTube 優先使用 fileUri 直接聽音訊
     if (isYoutube) {
-      try {
-        // 先測試是否能用 fileUri（這裡只是結構，實際呼叫在後面）
-        return [
-          {
-            fileData: {
-              fileUri: body.videoLink,
-              mimeType: "video/mp4",
-            },
+      return [
+        {
+          fileData: {
+            fileUri: body.videoLink,
+            mimeType: "video/mp4",
           },
-          {
-            text: "Please fully transcribe and analyze this video's audio content in detail.",
-          },
-        ];
-      } catch (e) {
-        console.warn("fileUri 失敗，切換到字幕模式");
-      }
+        },
+        {
+          text: "Please fully transcribe and analyze this video's audio content in detail.",
+        },
+      ];
     }
 
-    // === 2. fallback：抓字幕 + 網頁資訊 ===
+    // 非 YouTube 或 fallback 時使用字幕模式
     const context = await getNonYoutubeLinkContext(body.videoLink);
     return [{
       text: `Analyze this media link: ${body.videoLink}\n\nPage context:\n${context.pageText || "(none)"}\n\nTranscript or captions:\n${context.transcript || "(no captions found; please provide transcript manually)"}`,
