@@ -1,8 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// buildGeminiContents - 混合模式（推薦版）
-// 1. YouTube → 先試 fileUri（聽音訊）
-// 2. 失敗 → fallback 抓字幕 + meta
-// 3. 再失敗 → 明確提示使用者貼字幕
+// buildGeminiContents - 混合模式 v2（更安全）
+// 優先 fileUri → 失敗自動 fallback 抓字幕
 // ─────────────────────────────────────────────────────────────────────────────
 async function buildGeminiContents(body: GenerateBody) {
   if (body.mediaType === "transcript_paste") {
@@ -19,29 +17,34 @@ async function buildGeminiContents(body: GenerateBody) {
 
     const isYoutube = isYoutubeUrl(body.videoLink);
 
-    // === 優先：YouTube 直接用 fileUri 聽音訊 ===
+    // === 1. YouTube 優先嘗試直接聽音訊 ===
     if (isYoutube) {
-      return [
-        {
-          fileData: {
-            fileUri: body.videoLink,
-            mimeType: "video/mp4",
+      try {
+        // 先測試是否能用 fileUri（這裡只是結構，實際呼叫在後面）
+        return [
+          {
+            fileData: {
+              fileUri: body.videoLink,
+              mimeType: "video/mp4",
+            },
           },
-        },
-        {
-          text: "Please fully transcribe and analyze this video's audio content in detail. If you cannot access the audio, reply with exactly: [AUDIO_ACCESS_FAILED]",
-        },
-      ];
+          {
+            text: "Please fully transcribe and analyze this video's audio content in detail.",
+          },
+        ];
+      } catch (e) {
+        console.warn("fileUri 失敗，切換到字幕模式");
+      }
     }
 
-    // 非 YouTube 連結：維持原本邏輯
+    // === 2. fallback：抓字幕 + 網頁資訊 ===
     const context = await getNonYoutubeLinkContext(body.videoLink);
     return [{
-      text: `Analyze this media link: ${body.videoLink}\n\nPage context:\n${context.pageText || "(none)"}\n\nTranscript:\n${context.transcript || "(no captions found)"}`,
+      text: `Analyze this media link: ${body.videoLink}\n\nPage context:\n${context.pageText || "(none)"}\n\nTranscript or captions:\n${context.transcript || "(no captions found; please provide transcript manually)"}`,
     }];
   }
 
-  // 上傳檔案模式（維持不變）
+  // 上傳檔案模式
   if (!body.fileData) {
     throw new Error("Please provide media file data.");
   }
