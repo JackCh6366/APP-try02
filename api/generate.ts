@@ -81,8 +81,10 @@ async function getNonYoutubeLinkContext(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // buildGeminiContents
-// 【主要修改】link 模式分兩條路：
-//   1. YouTube URL → 直接用 fileData.fileUri 讓 Gemini 原生讀取影片音訊
+// link 模式分兩條路：
+//   1. YouTube URL → 以純文字把 URL 嵌入 prompt，Gemini 原生識別並分析影音
+//      ⚠️ 不可用 fileData.fileUri 傳 YouTube 連結，那是 File API 上傳路徑，
+//         直接傳 YouTube URL 會導致 Gemini API 400 INVALID_ARGUMENT 錯誤。
 //   2. 一般 URL    → 維持原本抓 meta + 字幕的方式
 // ─────────────────────────────────────────────────────────────────────────────
 async function buildGeminiContents(body: GenerateBody) {
@@ -98,17 +100,13 @@ async function buildGeminiContents(body: GenerateBody) {
       throw new Error("Please provide a valid media URL.");
     }
 
-    // ── YouTube：讓 Gemini 直接聽音訊，不靠字幕 ──
+    // ── YouTube：以純文字 URL 嵌入 prompt，Gemini 模型原生支援 YouTube 連結理解 ──
+    // NOTE: fileData.fileUri 僅適用於 Gemini File API 已上傳的檔案或公開二進位 URL，
+    //       不可用於 YouTube 連結，否則 API 回傳 400 Invalid Argument。
     if (isYoutubeUrl(body.videoLink)) {
       return [
         {
-          fileData: {
-            fileUri: body.videoLink,   // Gemini 原生支援 YouTube URL
-            mimeType: "video/mp4",     // YouTube 連結填 video/mp4 即可觸發影音分析
-          },
-        },
-        {
-          text: "Please fully transcribe and analyze this video's audio content in detail. If you cannot access the audio or the link is invalid, reply with exactly: [CONTENT_ACCESS_FAILED]",
+          text: `Please analyze the following YouTube video in full detail.\nYouTube URL: ${body.videoLink}\n\nTranscribe and summarize the audio/spoken content as thoroughly as possible.`,
         },
       ];
     }
@@ -233,9 +231,10 @@ async function callGemini(
   const rawText: string =
     json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
 
-  if (rawText === "[CONTENT_ACCESS_FAILED]") {
+  if (!rawText) {
+    const finishReason = json?.candidates?.[0]?.finishReason;
     throw new Error(
-      "Gemini could not access the provided YouTube URL. The video may be private, age-restricted, or unavailable in this region."
+      `Gemini returned an empty response (finishReason: ${finishReason ?? "unknown"}). The video may be private, age-restricted, or the content could not be processed.`
     );
   }
 
