@@ -250,6 +250,22 @@ export default function App() {
     setError(null);
   };
 
+  // 與 AI 討論後採納修正建議：覆蓋目前結果並寫回 localStorage（沿用既有的儲存邏輯）
+  const handleResultUpdated = (updated: MediaSummaryResult) => {
+    try {
+      localStorage.setItem(`media_summary_${updated.id}`, JSON.stringify(updated));
+
+      const updatedHistory = history.map((item) =>
+        item.id === updated.id ? { ...item, title: updated.title } : item
+      );
+      localStorage.setItem("media_summaries_history", JSON.stringify(updatedHistory));
+      setHistory(updatedHistory);
+      setActiveResult(updated);
+    } catch (e) {
+      console.error("更新結果時發生問題:", e);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-800">
       {/* Premium Header */}
@@ -370,7 +386,7 @@ export default function App() {
             </div>
           ) : activeResult ? (
             /* Render output summary board directly if active */
-            <SummaryResult data={activeResult} />
+            <SummaryResult data={activeResult} onResultUpdated={handleResultUpdated} />
           ) : (
             /* Otherwise, show standard Input board with visual Welcomer card */
             <div className="space-y-6">

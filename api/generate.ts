@@ -203,7 +203,7 @@ async function callGemini(
   systemPrompt: string,
   apiKey: string
 ): Promise<any> {
-  const MODEL = "gemini-2.5-flash";
+  const MODEL = "gemini-3.1-flash-lite";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
 
   const body = {
@@ -359,7 +359,7 @@ export default async function handler(req: any, res: any) {
     return res.status(200).json({
       success: true,
       result,
-      usedModel: "gemini-2.5-flash",
+      usedModel: "gemini-3.1-flash-lite",
     });
 
   } catch (err: any) {
