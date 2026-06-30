@@ -1,6 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// buildGeminiContents - 混合模式 v3（Vercel 安全版）
-// 優先 fileUri，失敗時自動走字幕模式
+// buildGeminiContents
+// 【主要修改】link 模式分兩條路：
+//   1. YouTube URL → 直接用 fileData.fileUri 讓 Gemini 原生讀取影片音訊
+//   2. 一般 URL    → 維持原本抓 meta + 字幕的方式
 // ─────────────────────────────────────────────────────────────────────────────
 async function buildGeminiContents(body: GenerateBody) {
   if (body.mediaType === "transcript_paste") {
@@ -15,31 +17,32 @@ async function buildGeminiContents(body: GenerateBody) {
       throw new Error("Please provide a valid media URL.");
     }
 
-    const isYoutube = isYoutubeUrl(body.videoLink);
-
-    // YouTube 優先使用 fileUri 直接聽音訊
-    if (isYoutube) {
+    // ── YouTube：讓 Gemini 直接聽音訊，不靠字幕 ──
+    if (isYoutubeUrl(body.videoLink)) {
       return [
         {
           fileData: {
-            fileUri: body.videoLink,
-            mimeType: "video/mp4",
+            fileUri: body.videoLink,   // Gemini 原生支援 YouTube URL
+            mimeType: "video/mp4",     // YouTube 連結填 video/mp4 即可觸發影音分析
           },
         },
         {
-          text: "Please fully transcribe and analyze this video's audio content in detail.",
+          text: "Please fully transcribe and analyze this video's audio content in detail. If you cannot access the audio or the link is invalid, reply with exactly: [CONTENT_ACCESS_FAILED]",
         },
       ];
     }
 
-    // 非 YouTube 或 fallback 時使用字幕模式
+    // ── 非 YouTube：保留原本 meta + 字幕邏輯 ──
     const context = await getNonYoutubeLinkContext(body.videoLink);
-    return [{
-      text: `Analyze this media link: ${body.videoLink}\n\nPage context:\n${context.pageText || "(none)"}\n\nTranscript or captions:\n${context.transcript || "(no captions found; please provide transcript manually)"}`,
-    }];
+    return [
+      {
+        text: `Analyze this media link: ${body.videoLink}\n\nPage context:\n${context.pageText || "(none)"}\n\nTranscript or captions:\n${
+          context.transcript || "(no captions found; infer cautiously from available page context)"
+        }`,
+      },
+    ];
   }
 
-  // 上傳檔案模式
   if (!body.fileData) {
     throw new Error("Please provide media file data.");
   }
