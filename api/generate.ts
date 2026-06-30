@@ -540,8 +540,15 @@ async function generateWithGemini(body: GenerateBody) {
 }
  
 function parseJsonFromModel(content: string) {
+  // Step 0: 移除 reasoning 模型常見的 <think>...</think> 思考標籤
+  // Nemotron Omni 等推理模型即使指示 /no_think，仍可能殘留空的或未完全關閉的思考區塊
+  let trimmed = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+
+  // 除錯用：若解析失敗，這段 log 可在 Vercel Functions 日誌中查看模型實際回傳內容
+  console.log("[NVIDIA RAW RESPONSE — first 1000 chars]:", trimmed.slice(0, 1000));
+
   // Step 1: 移除 markdown 代碼塊包裝
-  let trimmed = content.trim()
+  trimmed = trimmed
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
@@ -577,12 +584,16 @@ function parseJsonFromModel(content: string) {
     const candidate = trimmed.slice(start, end + 1);
     try {
       return JSON.parse(candidate);
-    } catch {
+    } catch (e1: any) {
       const repaired = repairTruncatedJson(candidate);
       try {
         return JSON.parse(repaired);
-      } catch {
-        throw new Error("AI 回應格式異常，無法解析為有效 JSON。請重試一次。");
+      } catch (e2: any) {
+        // 把錯誤訊息與回應片段一併附上，方便直接從前端錯誤提示判斷問題，不需另查後端日誌
+        throw new Error(
+          `AI 回應格式異常，無法解析為有效 JSON。解析錯誤：${e2.message}。` +
+          `原始回應開頭：${trimmed.slice(0, 300).replace(/\n/g, " ")}`
+        );
       }
     }
   }
