@@ -37,6 +37,11 @@ interface MediaInputProps {
   isLoading: boolean;
 }
 
+// YouTube URL 識別（與後端保持一致）
+function isYoutubeUrl(url: string): boolean {
+  return /(?:youtube\.com\/(?:watch|shorts|embed)|youtu\.be\/)/.test(url);
+}
+
 export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
   const [activeTab, setActiveTab] = useState<"file" | "record" | "transcript_paste" | "link">("file");
 
@@ -363,7 +368,14 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         alert("請輸入包含 http:// 或 https:// 的完整網路連結位址！");
         return;
       }
-      onProcess({ provider, mediaType: "link", videoLink: videoLink.trim(), fileName: videoLink.trim(), options, localConfig });
+      // ── YouTube + NVIDIA 不相容：前端自動改用 Gemini 並提示 ──
+      let effectiveProvider = provider;
+      if (provider === "nvidia" && isYoutubeUrl(videoLink)) {
+        alert("YouTube 連結需使用 Google Gemini 進行音訊分析。\n已自動將提供商切換為 Gemini，請再試一次。");
+        setProvider("gemini");
+        return; // 讓使用者看到切換後再次確認送出
+      }
+      onProcess({ provider: effectiveProvider, mediaType: "link", videoLink: videoLink.trim(), fileName: videoLink.trim(), options, localConfig });
     }
   };
 
@@ -648,8 +660,27 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
               </div>
             )}
 
-            {/* 說明文字（無預覽時顯示） */}
-            {!videoPreview && !isFetchingPreview && !previewError && (
+            {/* NVIDIA + YouTube 不相容警告 */}
+            {provider === "nvidia" && isYoutubeUrl(videoLink) && (
+              <div className="flex items-start space-x-2.5 rounded-xl bg-amber-50 border border-amber-300 p-4 text-xs text-amber-900">
+                <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+                <div className="space-y-1.5">
+                  <p className="font-bold">⚠️ NVIDIA 不支援直接分析 YouTube 連結</p>
+                  <p className="leading-normal">YouTube 影音需透過 <strong>Google Gemini</strong> 才能直接讀取音訊。</p>
+                  <button
+                    type="button"
+                    onClick={() => setProvider("gemini")}
+                    className="inline-flex items-center space-x-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold rounded-lg transition-all cursor-pointer"
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    <span>切換為 Google Gemini</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 說明文字（無預覽且非 NVIDIA+YouTube 衝突時顯示） */}
+            {!videoPreview && !isFetchingPreview && !previewError && !(provider === "nvidia" && isYoutubeUrl(videoLink)) && (
               <div className="flex items-start space-x-2.5 rounded-xl bg-indigo-50/40 border border-indigo-100 p-4 text-xs text-indigo-800">
                 <Globe className="h-4 w-4 text-indigo-500 shrink-0 mt-0.5" />
                 <div className="space-y-1 font-medium">
