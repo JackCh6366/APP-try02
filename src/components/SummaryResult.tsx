@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   FileText,
@@ -15,121 +15,16 @@ import {
   Network,
   Activity,
   ListChecks,
-  MessageSquare,
-  Send,
-  Loader2,
-  Sparkles,
-  ThumbsUp,
-  X,
-  AlertCircle,
 } from "lucide-react";
-import { MediaSummaryResult, DiscussChatTurn, DiscussRevisedResult } from "../types";
+import { MediaSummaryResult } from "../types";
 
 interface SummaryResultProps {
   data: MediaSummaryResult;
-  onResultUpdated?: (updated: MediaSummaryResult) => void; // 採納修正後，回傳更新後的完整結果供父層覆蓋與存檔
 }
 
-export default function SummaryResult({ data, onResultUpdated }: SummaryResultProps) {
-  // 移除 "transcript" 頁籤，只保留四個有實際內容的頁籤，新增「與 AI 討論」
-  const [activeTab, setActiveTab] = useState<"summary" | "segments" | "translations" | "mindmap" | "discuss">("summary");
-
-  // ── 與 AI 討論狀態 ──
-  const [chatHistory, setChatHistory] = useState<DiscussChatTurn[]>([]);
-  const [discussInput, setDiscussInput] = useState("");
-  const [isDiscussing, setIsDiscussing] = useState(false);
-  const [discussError, setDiscussError] = useState<string | null>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatHistory, isDiscussing]);
-
-  const handleSendDiscuss = async () => {
-    const message = discussInput.trim();
-    if (!message || isDiscussing) return;
-
-    setDiscussInput("");
-    setDiscussError(null);
-    const newUserTurn: DiscussChatTurn = { role: "user", content: message };
-    const updatedHistory = [...chatHistory, newUserTurn];
-    setChatHistory(updatedHistory);
-    setIsDiscussing(true);
-
-    try {
-      const res = await fetch("/api/discuss", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider: data.usedModel?.startsWith("nvidia") ? "nvidia" : "gemini",
-          usedModel: data.usedModel,
-          currentResult: {
-            title: data.title,
-            summaryText: data.summaryText,
-            sections: data.sections,
-            keyConcepts: data.keyConcepts,
-            actionItems: data.actionItems,
-            translations: data.translations,
-          },
-          chatHistory: chatHistory.map((t) => ({ role: t.role, content: t.content })),
-          userMessage: message,
-        }),
-      });
-
-      const responseText = await res.text();
-      let resData: any = {};
-      if (responseText.trim()) {
-        try {
-          resData = JSON.parse(responseText);
-        } catch {
-          throw new Error(`回應格式異常 (${res.status})。${responseText.slice(0, 150)}`);
-        }
-      }
-
-      if (!res.ok || !resData.success) {
-        throw new Error(resData.error || `討論請求失敗 (${res.status})`);
-      }
-
-      const aiTurn: DiscussChatTurn = {
-        role: "assistant",
-        content: resData.reply || "（無回覆內容）",
-        hasRevision: !!resData.hasRevision,
-        revisedResult: resData.hasRevision ? (resData.revisedResult as DiscussRevisedResult) : undefined,
-        revisionStatus: resData.hasRevision ? "pending" : undefined,
-      };
-
-      setChatHistory((prev) => [...prev, aiTurn]);
-    } catch (err: any) {
-      setDiscussError(err.message || "討論時發生錯誤，請重試。");
-      // 失敗時把剛才的使用者訊息保留在畫面上，但不加入 AI 回覆，讓使用者可以重新送出
-    } finally {
-      setIsDiscussing(false);
-    }
-  };
-
-  // 採納某則訊息附帶的修正建議：覆蓋目前結果並通知父層存檔
-  const handleAdoptRevision = (turnIndex: number) => {
-    const turn = chatHistory[turnIndex];
-    if (!turn.revisedResult) return;
-
-    const updated: MediaSummaryResult = {
-      ...data,
-      title: turn.revisedResult.title,
-      summaryText: turn.revisedResult.summaryText,
-      sections: turn.revisedResult.sections,
-      keyConcepts: turn.revisedResult.keyConcepts,
-      actionItems: turn.revisedResult.actionItems,
-      translations: turn.revisedResult.translations,
-    };
-
-    setChatHistory((prev) => prev.map((t, i) => (i === turnIndex ? { ...t, revisionStatus: "adopted" } : t)));
-    onResultUpdated?.(updated);
-  };
-
-  // 放棄修正建議：保留原結果，標記為已放棄，可繼續討論
-  const handleDiscardRevision = (turnIndex: number) => {
-    setChatHistory((prev) => prev.map((t, i) => (i === turnIndex ? { ...t, revisionStatus: "discarded" } : t)));
-  };
+export default function SummaryResult({ data }: SummaryResultProps) {
+  // 移除 "transcript" 頁籤，只保留四個有實際內容的頁籤
+  const [activeTab, setActiveTab] = useState<"summary" | "segments" | "translations" | "mindmap">("summary");
   const [activeLangTab, setActiveLangTab] = useState<string>("zh");
   const [copiedText, setCopiedText] = useState<string | null>(null);
 
@@ -231,7 +126,6 @@ export default function SummaryResult({ data, onResultUpdated }: SummaryResultPr
           { key: "segments", icon: <Clock className="h-4 w-4" />, label: "時間軸/分段紀要" },
           { key: "translations", icon: <Globe className="h-4 w-4" />, label: "多語系對照翻譯" },
           { key: "mindmap", icon: <Network className="h-4 w-4" />, label: "結構關聯圖" },
-          { key: "discuss", icon: <MessageSquare className="h-4 w-4" />, label: "與 AI 討論" },
         ].map(({ key, icon, label }) => (
           <button
             key={key}
@@ -433,138 +327,6 @@ export default function SummaryResult({ data, onResultUpdated }: SummaryResultPr
                   )}
                 </div>
               </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 5: 與 AI 討論 */}
-        {activeTab === "discuss" && (
-          <div className="flex flex-col h-[600px] bg-slate-50/50 rounded-xl border border-slate-100 overflow-hidden">
-            {/* 說明列 */}
-            <div className="px-4 py-3 border-b border-slate-100 bg-white flex items-center gap-2 shrink-0">
-              <Sparkles className="h-4 w-4 text-indigo-500" />
-              <p className="text-xs text-slate-500">
-                可以針對這份分析結果提問，或要求 AI 調整內容。若 AI 提出修正建議，你可以選擇<strong className="text-slate-700">採納</strong>覆蓋目前結果，或<strong className="text-slate-700">放棄</strong>並繼續討論。
-              </p>
-            </div>
-
-            {/* 對話訊息列表 */}
-            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-              {chatHistory.length === 0 && (
-                <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 space-y-2">
-                  <MessageSquare className="h-8 w-8 text-slate-300" />
-                  <p className="text-xs">還沒有討論紀錄，輸入訊息開始與 AI 對話吧。</p>
-                </div>
-              )}
-
-              {chatHistory.map((turn, idx) => {
-                const isUser = turn.role === "user";
-                return (
-                  <div key={idx} className={`flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}>
-                    <div className={`h-7 w-7 shrink-0 rounded-lg flex items-center justify-center text-[10px] font-bold ${isUser ? "bg-slate-800 text-white" : "bg-gradient-to-tr from-indigo-500 to-emerald-400 text-white"}`}>
-                      {isUser ? "我" : "AI"}
-                    </div>
-                    <div className={`flex flex-col gap-2 max-w-[80%] ${isUser ? "items-end" : "items-start"}`}>
-                      <div className={`px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${isUser ? "bg-slate-800 text-white rounded-tr-sm" : "bg-white border border-slate-100 text-slate-700 rounded-tl-sm shadow-xs"}`}>
-                        {turn.content}
-                      </div>
-
-                      {/* 修正建議卡片 */}
-                      {turn.hasRevision && turn.revisedResult && (
-                        <div className="w-full bg-amber-50/60 border border-amber-200 rounded-xl p-3.5 space-y-2.5">
-                          <div className="flex items-center gap-1.5 text-xs font-bold text-amber-700">
-                            <AlertCircle className="h-3.5 w-3.5" />
-                            <span>AI 提出了修正建議</span>
-                          </div>
-                          <div className="bg-white rounded-lg border border-amber-100 p-3 space-y-1.5 max-h-48 overflow-y-auto">
-                            <p className="text-xs font-bold text-slate-800">{turn.revisedResult.title}</p>
-                            <p className="text-xs text-slate-600 leading-relaxed line-clamp-4">{turn.revisedResult.summaryText}</p>
-                          </div>
-
-                          {turn.revisionStatus === "pending" && (
-                            <div className="flex gap-2">
-                              <button
-                                onClick={() => handleAdoptRevision(idx)}
-                                className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2 rounded-lg transition-all cursor-pointer"
-                              >
-                                <ThumbsUp className="h-3.5 w-3.5" />
-                                採納此修正
-                              </button>
-                              <button
-                                onClick={() => handleDiscardRevision(idx)}
-                                className="flex-1 flex items-center justify-center gap-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-bold py-2 rounded-lg transition-all cursor-pointer"
-                              >
-                                <X className="h-3.5 w-3.5" />
-                                放棄
-                              </button>
-                            </div>
-                          )}
-                          {turn.revisionStatus === "adopted" && (
-                            <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 rounded-lg py-1.5 px-2.5">
-                              <Check className="h-3.5 w-3.5" />
-                              已採納，結果已更新
-                            </div>
-                          )}
-                          {turn.revisionStatus === "discarded" && (
-                            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-400 bg-slate-50 rounded-lg py-1.5 px-2.5">
-                              <X className="h-3.5 w-3.5" />
-                              已放棄此建議
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-
-              {isDiscussing && (
-                <div className="flex gap-2.5">
-                  <div className="h-7 w-7 shrink-0 rounded-lg flex items-center justify-center bg-gradient-to-tr from-indigo-500 to-emerald-400 text-white">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  </div>
-                  <div className="px-3.5 py-2.5 rounded-2xl rounded-tl-sm bg-white border border-slate-100 text-xs text-slate-400">
-                    AI 思考中...
-                  </div>
-                </div>
-              )}
-
-              {discussError && (
-                <div className="flex items-center gap-2 px-3.5 py-2.5 bg-red-50 border border-red-100 rounded-xl text-xs text-red-600">
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                  <span>{discussError}</span>
-                </div>
-              )}
-
-              <div ref={chatEndRef} />
-            </div>
-
-            {/* 輸入區 */}
-            <div className="border-t border-slate-100 bg-white p-3 shrink-0">
-              <div className="flex items-end gap-2">
-                <textarea
-                  value={discussInput}
-                  onChange={(e) => setDiscussInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendDiscuss();
-                    }
-                  }}
-                  placeholder="輸入問題，或描述你想調整的內容..."
-                  disabled={isDiscussing}
-                  rows={2}
-                  className="flex-1 resize-none text-sm border border-slate-200 rounded-xl px-3.5 py-2.5 focus:border-indigo-400 focus:outline-none disabled:bg-slate-50 disabled:text-slate-400"
-                />
-                <button
-                  onClick={handleSendDiscuss}
-                  disabled={isDiscussing || !discussInput.trim()}
-                  className="h-10 w-10 shrink-0 flex items-center justify-center bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:cursor-not-allowed text-white rounded-xl transition-all cursor-pointer"
-                >
-                  {isDiscussing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                </button>
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1.5">Enter 送出・Shift+Enter 換行</p>
             </div>
           </div>
         )}

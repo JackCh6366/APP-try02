@@ -197,26 +197,21 @@ Always include the Traditional Chinese summary in "summaryText".`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Gemini API call (native fetch, no SDK — Vercel-safe)
-// 若新模型 400 失敗（例如帳號尚未開通該模型權限），自動降級到穩定版本重試一次
 // ─────────────────────────────────────────────────────────────────────────────
-const GEMINI_MODEL_PRIMARY = "gemini-2.5-flash"; // 暫時改回穩定版本，3.1-flash-lite 在 YouTube 連結路徑出現 400 錯誤待查
-const GEMINI_MODEL_FALLBACK = "gemini-2.5-flash";
-
-async function callGeminiModel(
+async function callGemini(
   contents: any[],
   systemPrompt: string,
-  apiKey: string,
-  model: string
-): Promise<{ json: any; res: Response }> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  apiKey: string
+): Promise<any> {
+  const MODEL = "gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
 
   const body = {
     contents: [{ role: "user", parts: contents }],
     systemInstruction: { parts: [{ text: systemPrompt }] },
     generationConfig: {
       responseMimeType: "application/json",
-      // Gemini 3.x 系列官方建議維持預設 temperature/top_p/top_k，
-      // 自訂這些參數在 3.x 推理模型上可能觸發行為異常或 400 錯誤。
+      temperature: 0.2,
     },
   };
 
@@ -227,26 +222,7 @@ async function callGeminiModel(
     signal: AbortSignal.timeout(280_000),
   });
 
-  const json = (await res.json()) as any;
-  return { json, res };
-}
-
-async function callGemini(
-  contents: any[],
-  systemPrompt: string,
-  apiKey: string
-): Promise<any> {
-  let { json, res } = await callGeminiModel(contents, systemPrompt, apiKey, GEMINI_MODEL_PRIMARY);
-  let usedModel = GEMINI_MODEL_PRIMARY;
-
-  // 主要模型回 400/404（帳號權限尚未開通、或模型名稱當下不可用）→ 自動降級重試
-  if (!res.ok && (res.status === 400 || res.status === 404)) {
-    console.warn(`[Gemini] ${GEMINI_MODEL_PRIMARY} 失敗 (${res.status})，降級至 ${GEMINI_MODEL_FALLBACK} 重試...`);
-    const fallback = await callGeminiModel(contents, systemPrompt, apiKey, GEMINI_MODEL_FALLBACK);
-    json = fallback.json;
-    res = fallback.res;
-    usedModel = GEMINI_MODEL_FALLBACK;
-  }
+  const json = await res.json() as any;
 
   if (!res.ok) {
     throw new Error(
@@ -263,7 +239,7 @@ async function callGemini(
     );
   }
 
-  return { result: JSON.parse(rawText), usedModel };
+  return JSON.parse(rawText);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -378,12 +354,12 @@ export default async function handler(req: any, res: any) {
     }
 
     const contents = await buildGeminiContents(body);
-    const { result, usedModel } = await callGemini(contents, systemPrompt, apiKey);
+    const result = await callGemini(contents, systemPrompt, apiKey);
 
     return res.status(200).json({
       success: true,
       result,
-      usedModel,
+      usedModel: "gemini-2.5-flash",
     });
 
   } catch (err: any) {

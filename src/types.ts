@@ -55,21 +55,3 @@ export interface SummaryHistoryItem {
   mediaType: "file" | "record" | "transcript_paste" | "link";
   createdAt: string;
 }
-
-// ── 結果討論功能 ─────────────────────────────────────────────────────────────
-export interface DiscussChatTurn {
-  role: "user" | "assistant";
-  content: string;
-  hasRevision?: boolean; // 此則 AI 回覆是否附帶修正建議
-  revisedResult?: DiscussRevisedResult; // 修正建議內容
-  revisionStatus?: "pending" | "adopted" | "discarded"; // 使用者對此修正建議的處理狀態
-}
-
-export interface DiscussRevisedResult {
-  title: string;
-  summaryText: string;
-  sections: TopicSection[];
-  keyConcepts: string[];
-  actionItems: string[];
-  translations: Record<string, string>;
-}
