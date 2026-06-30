@@ -190,7 +190,7 @@ export default function App() {
         }
 
         geminiResult = data.result;
-        usedModelName = data.usedModel || (payload.provider === "nvidia" ? "nvidia/llama-3.3-nemotron-super-49b-v1.5" : "gemini-2.5-flash-lite");
+        usedModelName = data.usedModel || (payload.provider === "nvidia" ? "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" : "gemini-2.5-flash-lite");
       }
 
       // Successful analysis! Register in storage

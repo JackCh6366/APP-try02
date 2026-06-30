@@ -29,8 +29,9 @@ export const config = {
 };
  
 const GEMINI_MODEL = "gemini-2.5-flash-lite";
-const NVIDIA_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5";
+const NVIDIA_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"; // 全模態：音訊/影片/圖片/文字
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
+const NVIDIA_MAX_AUDIO_MB = 15; // base64 編碼後請求體上限保護（避免逾時/過大）
  
 function sendJson(res: any, statusCode: number, payload: unknown) {
   res.status(statusCode).json(payload);
@@ -190,9 +191,12 @@ ${goalInstruction}
 }
  
 function buildNvidiaSystemInstruction(body: GenerateBody) {
-  return `/no_think
- 
-${buildSystemInstruction(body)}
+  const isAudioInput = body.mediaType === "file" || body.mediaType === "record";
+  // 音訊輸入：Omni 官方要求關閉 reasoning（/no_think），搭配呼叫端的 enable_thinking: false。
+  // 純文字輸入：保留 reasoning 開啟，有助於摘要/翻譯品質。
+  const thinkDirective = isAudioInput ? "/no_think\n\n" : "";
+
+  return `${thinkDirective}${buildSystemInstruction(body)}
  
 !!NVIDIA STRICT JSON RULES — MUST FOLLOW!!
 - Output ONLY a single raw JSON object. No markdown fences. No \`\`\`json. No \`\`\`.
@@ -306,31 +310,62 @@ async function buildGeminiContents(body: GenerateBody) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// buildNvidiaPrompt（NVIDIA 不支援 fileData，YouTube 連結改抓字幕 fallback）
+// buildNvidiaContent
+// Nemotron 3 Nano Omni 為全模態模型，支援音訊/影片/文字輸入。
+// 回傳 OpenAI 相容的 content 陣列（text + input_audio）。
+// 注意：Omni 不支援 fileUri 直傳 YouTube，YouTube 連結仍走字幕/meta 路徑。
 // ─────────────────────────────────────────────────────────────────────────────
-async function buildNvidiaPrompt(body: GenerateBody) {
+async function buildNvidiaContent(body: GenerateBody): Promise<any[]> {
   if (body.mediaType === "file" || body.mediaType === "record") {
-    throw new Error("The selected NVIDIA model is a text model. Please use Google Gemini for audio/video uploads, or paste a transcript before selecting NVIDIA.");
+    if (!body.fileData) {
+      throw new Error("Please provide media file data.");
+    }
+
+    // 檔案大小保護：base64 字串長度約為原始檔案的 4/3 倍
+    const approxMB = (body.fileData.length * 0.75) / (1024 * 1024);
+    if (approxMB > NVIDIA_MAX_AUDIO_MB) {
+      throw new Error(
+        `音訊檔案過大（約 ${approxMB.toFixed(1)}MB），NVIDIA 本模型建議上限為 ${NVIDIA_MAX_AUDIO_MB}MB。請改用較短的音訊片段，或切換至 Google Gemini 處理大檔案。`
+      );
+    }
+
+    const mime = body.mimeType || "audio/webm";
+    // Omni 音訊輸入規格要求：純音訊用 input_audio，格式需為 wav 或 mp3 容器；
+    // 其餘格式（webm/m4a）多數情況可被底層解碼器接受，若失敗將拋出明確錯誤。
+    const audioFormat = mime.includes("wav") ? "wav" : mime.includes("mp3") || mime.includes("mpeg") ? "mp3" : "wav";
+
+    return [
+      { type: "text", text: `請完整聽寫並深度分析以下音訊內容。檔名：${body.fileName || "未命名"}。` },
+      {
+        type: "input_audio",
+        input_audio: { data: body.fileData, format: audioFormat },
+      },
+    ];
   }
- 
+
   if (body.mediaType === "transcript_paste") {
     if (!body.textTranscript?.trim()) {
       throw new Error("Please provide transcript text.");
     }
-    return `Analyze this transcript:\n\n${body.textTranscript}`;
+    return [{ type: "text", text: `Analyze this transcript:\n\n${body.textTranscript}` }];
   }
- 
+
   if (body.mediaType === "link") {
     if (!body.videoLink?.trim()) {
       throw new Error("Please provide a valid media URL.");
     }
-    // NVIDIA 為純文字模型，YouTube 連結也走 meta + 字幕路徑
+    // YouTube 連結：Omni 目前不支援直接讀取遠端影片網址，仍走字幕/meta 抓取路徑
     const context = await getNonYoutubeLinkContext(body.videoLink);
-    return `Analyze this media link: ${body.videoLink}\n\nPage context:\n${context.pageText || "(none)"}\n\nTranscript or captions:\n${
-      context.transcript || "(no captions found; summarize only from available page context)"
-    }`;
+    return [
+      {
+        type: "text",
+        text: `Analyze this media link: ${body.videoLink}\n\nPage context:\n${context.pageText || "(none)"}\n\nTranscript or captions:\n${
+          context.transcript || "(no captions found; summarize only from available page context)"
+        }`,
+      },
+    ];
   }
- 
+
   throw new Error("Please choose an input type.");
 }
  
@@ -600,27 +635,33 @@ async function generateWithNvidia(body: GenerateBody) {
   if (!apiKey) {
     throw new Error("NVIDIA_API_KEY is not configured.");
   }
- 
-  const userPrompt = await buildNvidiaPrompt(body);
+
+  const isAudioInput = body.mediaType === "file" || body.mediaType === "record";
+  const userContent = await buildNvidiaContent(body);
+
+  // Nemotron 3 Nano Omni 官方規格：音訊輸入時必須關閉 reasoning 且 temperature 設為 0，
+  // 否則模型可能拒答或輸出不穩定。純文字路徑維持原本的 reasoning 開啟設定。
   const response = await fetch(`${NVIDIA_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
+      "NVCF-POLL-SECONDS": "300", // 讓 NVIDIA serverless 端點保持連線，避免長音訊逾時
     },
     body: JSON.stringify({
       model: NVIDIA_MODEL,
       messages: [
         { role: "system", content: buildNvidiaSystemInstruction(body) },
-        { role: "user", content: userPrompt },
+        { role: "user", content: userContent },
       ],
-      temperature: 0.2,
+      temperature: isAudioInput ? 0 : 0.2,
       top_p: 0.95,
       max_tokens: 65000,  // NVIDIA 模型實際穩定上限，超過易截斷或亂格式
       stream: false,
       frequency_penalty: 0,
       presence_penalty: 0,
+      extra_body: { chat_template_kwargs: { enable_thinking: !isAudioInput } },
     }),
   });
  

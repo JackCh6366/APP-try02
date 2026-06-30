@@ -292,10 +292,18 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         alert("請先選擇或拖入影音檔案！");
         return;
       }
+      if (provider === "nvidia" && selectedFile.size > 15 * 1024 * 1024) {
+        alert("NVIDIA 模型建議檔案大小在 15MB 內以確保穩定處理。請改用較短片段，或切換至 Google Gemini 處理大檔案。");
+        return;
+      }
       onProcess({ provider, mediaType: "file", fileData: fileBase64, fileName: selectedFile.name, mimeType: selectedFile.type, options });
     } else if (activeTab === "record") {
       if (!recordedBlob) {
         alert("請先錄製一段音訊！");
+        return;
+      }
+      if (provider === "nvidia" && recordedBlob.size > 15 * 1024 * 1024) {
+        alert("NVIDIA 模型建議檔案大小在 15MB 內以確保穩定處理，錄音時間過長請切換至 Google Gemini。");
         return;
       }
       const reader = new FileReader();
@@ -657,7 +665,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
               <div className="space-y-1.5">
                 {[
                   { value: "gemini" as AIProvider, label: "Google Gemini", sub: "gemini-2.5-flash-lite" },
-                  { value: "nvidia" as AIProvider, label: "NVIDIA", sub: "llama-3.3-nemotron-super-49b-v1.5" },
+                  { value: "nvidia" as AIProvider, label: "NVIDIA", sub: "Nemotron 3 Nano Omni（支援音訊/影片）" },
                   { value: "local" as AIProvider, label: "本地模型", sub: "Ollama / LM Studio（在你電腦執行）" },
                 ].map(({ value, label, sub }) => (
                   <label key={value} className="flex items-center p-2 rounded-lg bg-white border border-slate-100 hover:border-slate-300 cursor-pointer transition-all">
@@ -673,7 +681,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
               {provider === "nvidia" && (
                 <div className="flex items-start space-x-2 text-[10px] text-slate-500 bg-white border border-slate-100 rounded-lg p-2">
                   <Cpu className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                  <span>NVIDIA 為純文字模型，不支援直接上傳音訊，適合貼上字幕文字使用。</span>
+                  <span>支援上傳音訊檔案、文字稿與連結。單檔建議在 15MB 內以確保穩定處理（大型影片請改用 Gemini）。</span>
                 </div>
               )}
               {provider === "local" && (
