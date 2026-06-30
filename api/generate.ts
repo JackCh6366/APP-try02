@@ -29,7 +29,9 @@ export const config = {
 };
  
 const GEMINI_MODEL = "gemini-2.5-flash-lite";
-const NVIDIA_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"; // 全模態：音訊/影片/圖片/文字
+// 雙模型分流：純文字路徑用穩定驗證過的舊模型，只有音訊/影片上傳才用新的多模態 Omni 模型
+const NVIDIA_TEXT_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5";       // 文字稿 / YouTube 連結
+const NVIDIA_OMNI_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";  // 上傳音訊 / 現場錄音
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
 const NVIDIA_MAX_AUDIO_MB = 15; // base64 編碼後請求體上限保護（避免逾時/過大）
  
@@ -647,11 +649,32 @@ async function generateWithNvidia(body: GenerateBody) {
     throw new Error("NVIDIA_API_KEY is not configured.");
   }
 
+  // 雙模型分流：
+  // - 純文字（文字稿貼上 / YouTube 連結）→ 沿用驗證過的穩定舊模型，邏輯與先前版本完全相同
+  // - 音訊/影片上傳（file / record）→ 才使用支援多模態的 Omni 模型
   const isAudioInput = body.mediaType === "file" || body.mediaType === "record";
+  const activeModel = isAudioInput ? NVIDIA_OMNI_MODEL : NVIDIA_TEXT_MODEL;
   const userContent = await buildNvidiaContent(body);
 
-  // Nemotron 3 Nano Omni 官方規格：音訊輸入時必須關閉 reasoning 且 temperature 設為 0，
-  // 否則模型可能拒答或輸出不穩定。純文字路徑維持原本的 reasoning 開啟設定。
+  // chat_template_kwargs（enable_thinking）僅 Omni 模型需要與支援，純文字舊模型不帶這個參數
+  const requestBody: Record<string, any> = {
+    model: activeModel,
+    messages: [
+      { role: "system", content: buildNvidiaSystemInstruction(body) },
+      { role: "user", content: userContent },
+    ],
+    temperature: isAudioInput ? 0 : 0.2,
+    top_p: 0.95,
+    max_tokens: 65000,  // NVIDIA 模型實際穩定上限，超過易截斷或亂格式
+    stream: false,
+    frequency_penalty: 0,
+    presence_penalty: 0,
+  };
+  if (isAudioInput) {
+    // Nemotron 3 Nano Omni 官方規格：音訊輸入時必須關閉 reasoning，否則模型可能拒答或輸出不穩定
+    requestBody.chat_template_kwargs = { enable_thinking: false };
+  }
+
   const response = await fetch(`${NVIDIA_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
@@ -660,20 +683,7 @@ async function generateWithNvidia(body: GenerateBody) {
       "Content-Type": "application/json",
       "NVCF-POLL-SECONDS": "300", // 讓 NVIDIA serverless 端點保持連線，避免長音訊逾時
     },
-    body: JSON.stringify({
-      model: NVIDIA_MODEL,
-      messages: [
-        { role: "system", content: buildNvidiaSystemInstruction(body) },
-        { role: "user", content: userContent },
-      ],
-      temperature: isAudioInput ? 0 : 0.2,
-      top_p: 0.95,
-      max_tokens: 65000,  // NVIDIA 模型實際穩定上限，超過易截斷或亂格式
-      stream: false,
-      frequency_penalty: 0,
-      presence_penalty: 0,
-      chat_template_kwargs: { enable_thinking: !isAudioInput },
-    }),
+    body: JSON.stringify(requestBody),
   });
  
   const responseText = await response.text();
@@ -704,7 +714,7 @@ async function generateWithNvidia(body: GenerateBody) {
  
   return {
     result: parseJsonFromModel(content),
-    usedModel: NVIDIA_MODEL,
+    usedModel: activeModel,
   };
 }
  

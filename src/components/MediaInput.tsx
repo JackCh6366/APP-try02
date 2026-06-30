@@ -74,6 +74,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
 
   // File Upload states
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFileDuration, setSelectedFileDuration] = useState<number | null>(null); // 秒數，null 代表尚未偵測或無法偵測
   const [fileBase64, setFileBase64] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -152,13 +153,36 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
     if (e.target.files && e.target.files[0]) handleFileSelected(e.target.files[0]);
   };
 
-  const handleFileSelected = (file: File) => {
+  // 讀取音訊/影片檔案的實際時長（秒），無法讀取時回傳 null（例如格式不支援預覽）
+  const detectMediaDuration = (file: File): Promise<number | null> => {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const mediaEl = file.type.startsWith("video/") ? document.createElement("video") : document.createElement("audio");
+      mediaEl.preload = "metadata";
+      mediaEl.onloadedmetadata = () => {
+        URL.revokeObjectURL(url);
+        resolve(isFinite(mediaEl.duration) ? mediaEl.duration : null);
+      };
+      mediaEl.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(null);
+      };
+      mediaEl.src = url;
+    });
+  };
+
+  const handleFileSelected = async (file: File) => {
     const limit = 25 * 1024 * 1024;
     if (file.size > limit) {
       alert("檔案大小超過 25MB 限制！若是大型影片，建議使用工具先單獨匯出成音訊檔（如 MP3）上傳，處理速度會大幅加快。");
       return;
     }
     setSelectedFile(file);
+    setSelectedFileDuration(null);
+
+    // 偵測時長（非同步，不阻塞檔案載入）
+    detectMediaDuration(file).then(setSelectedFileDuration);
+
     const reader = new FileReader();
     reader.onload = () => {
       const result = reader.result as string;
@@ -292,9 +316,16 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         alert("請先選擇或拖入影音檔案！");
         return;
       }
-      if (provider === "nvidia" && selectedFile.size > 15 * 1024 * 1024) {
-        alert("NVIDIA 模型建議檔案大小在 15MB 內以確保穩定處理。請改用較短片段，或切換至 Google Gemini 處理大檔案。");
-        return;
+      if (provider === "nvidia") {
+        if (selectedFileDuration !== null && selectedFileDuration > 180) {
+          alert(`目前 Vercel 方案執行時間有限，NVIDIA 模型建議音訊/影片長度在 3 分鐘內（偵測到約 ${formatTime(Math.round(selectedFileDuration))}）。請改用較短片段，或切換至 Google Gemini 處理較長內容。`);
+          return;
+        }
+        // 時長偵測失敗時（例如格式特殊），退回用檔案大小粗略估計
+        if (selectedFileDuration === null && selectedFile.size > 15 * 1024 * 1024) {
+          alert("NVIDIA 模型建議檔案在 15MB 內（約 3 分鐘音訊）以確保穩定處理。請改用較短片段，或切換至 Google Gemini。");
+          return;
+        }
       }
       onProcess({ provider, mediaType: "file", fileData: fileBase64, fileName: selectedFile.name, mimeType: selectedFile.type, options });
     } else if (activeTab === "record") {
@@ -302,8 +333,8 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         alert("請先錄製一段音訊！");
         return;
       }
-      if (provider === "nvidia" && recordedBlob.size > 15 * 1024 * 1024) {
-        alert("NVIDIA 模型建議檔案大小在 15MB 內以確保穩定處理，錄音時間過長請切換至 Google Gemini。");
+      if (provider === "nvidia" && recordingDuration > 180) {
+        alert(`目前 Vercel 方案執行時間有限，NVIDIA 模型建議音訊長度在 3 分鐘內（目前錄音 ${formatTime(recordingDuration)}）。請重新錄製較短片段，或切換至 Google Gemini 處理較長音訊。`);
         return;
       }
       const reader = new FileReader();
@@ -339,6 +370,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
   const clearSelectedFile = () => {
     setSelectedFile(null);
     setFileBase64("");
+    setSelectedFileDuration(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -403,15 +435,25 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-bold text-slate-800 truncate select-none">{selectedFile.name}</p>
-                      <p className="text-xs text-slate-400">大小: {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • 格式: {selectedFile.type || "未知"}</p>
+                      <p className="text-xs text-slate-400">
+                        大小: {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • 格式: {selectedFile.type || "未知"}
+                        {selectedFileDuration !== null && <> • 時長: {formatTime(Math.round(selectedFileDuration))}</>}
+                      </p>
                     </div>
                   </div>
                   <button onClick={clearSelectedFile} disabled={isLoading} className="text-xs font-semibold text-slate-400 hover:text-slate-800 p-1 bg-slate-50 hover:bg-slate-100 rounded-md transition-all shrink-0 cursor-pointer">清除</button>
                 </div>
-                <div className="flex items-center justify-center space-x-2 text-xs text-slate-500">
-                  <AlertCircle className="h-4 w-4 text-slate-400" />
-                  <span>檔案已準備就緒，點選下方按鈕開始 AI 彙整。</span>
-                </div>
+                {provider === "nvidia" && selectedFileDuration !== null && selectedFileDuration > 180 ? (
+                  <div className="flex items-center justify-center space-x-2 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>此檔案約 {formatTime(Math.round(selectedFileDuration))}，超過 NVIDIA 建議的 3 分鐘上限，送出時將被擋下。建議切換至 Google Gemini。</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center space-x-2 text-xs text-slate-500">
+                    <AlertCircle className="h-4 w-4 text-slate-400" />
+                    <span>檔案已準備就緒，點選下方按鈕開始 AI 彙整。</span>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -665,7 +707,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
               <div className="space-y-1.5">
                 {[
                   { value: "gemini" as AIProvider, label: "Google Gemini", sub: "gemini-2.5-flash-lite" },
-                  { value: "nvidia" as AIProvider, label: "NVIDIA", sub: "Nemotron 3 Nano Omni（支援音訊/影片）" },
+                  { value: "nvidia" as AIProvider, label: "NVIDIA", sub: "文字用 Nemotron 49B・音訊用 Omni" },
                   { value: "local" as AIProvider, label: "本地模型", sub: "Ollama / LM Studio（在你電腦執行）" },
                 ].map(({ value, label, sub }) => (
                   <label key={value} className="flex items-center p-2 rounded-lg bg-white border border-slate-100 hover:border-slate-300 cursor-pointer transition-all">
