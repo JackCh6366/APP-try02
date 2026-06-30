@@ -130,7 +130,7 @@ async function discussWithGemini(body: DiscussBody, apiKey: string): Promise<any
     systemInstruction: { parts: [{ text: DISCUSS_SYSTEM_PROMPT }] },
     generationConfig: {
       responseMimeType: "application/json",
-      temperature: 0.4,
+      // Gemini 3.x 系列官方建議維持預設 temperature，避免觸發 400 錯誤
     },
   };
 
