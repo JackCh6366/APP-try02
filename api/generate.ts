@@ -185,20 +185,16 @@ function cleanTranscriptForNvidia(raw: string, maxChars = 6_000): string {
  *   4. 把中間的所有內容替換成空字串，保留 JSON 結構
  */
 function stripTranscriptFromRawJson(raw: string): string {
-  // 已知在 transcript 之後出現的欄位（依 schema 順序排列）
   const NEXT_FIELDS = ["summaryText", "segments", "keyConcepts", "actionItems", "translations"];
 
-  // 找 "transcript" key
   const transcriptKeyPos = raw.search(/"transcript"\s*:\s*"/);
-  if (transcriptKeyPos < 0) return raw; // 找不到，不修改
+  if (transcriptKeyPos < 0) return raw;
 
-  // 找 value 的開頭引號位置
-  const colonPos  = raw.indexOf(":", transcriptKeyPos);
+  const colonPos     = raw.indexOf(":", transcriptKeyPos);
   if (colonPos < 0) return raw;
   const openQuotePos = raw.indexOf('"', colonPos + 1);
   if (openQuotePos < 0) return raw;
 
-  // 找最近的後繼欄位 key（從 openQuotePos 之後開始搜）
   let nextFieldPos = -1;
   for (const field of NEXT_FIELDS) {
     const pos = raw.indexOf(`"${field}"`, openQuotePos + 1);
@@ -206,15 +202,27 @@ function stripTranscriptFromRawJson(raw: string): string {
       nextFieldPos = pos;
     }
   }
-  if (nextFieldPos < 0) return raw; // 找不到後繼欄位
 
-  // 往回找後繼欄位之前最後一個 "，即 transcript 的關閉引號
-  const closeQuotePos = raw.lastIndexOf('"', nextFieldPos - 1);
-  if (closeQuotePos <= openQuotePos) return raw; // 關閉引號在開頭引號之前，異常
+  if (nextFieldPos >= 0) {
+    // ── Case 1：後繼欄位存在（JSON 完整，但 transcript 內有未跳脫引號）──
+    const closeQuotePos = raw.lastIndexOf('"', nextFieldPos - 1);
+    if (closeQuotePos > openQuotePos) {
+      return raw.slice(0, openQuotePos + 1) + raw.slice(closeQuotePos);
+    }
+  }
 
-  // 拼接：保留開頭引號，跳過所有內容，從關閉引號開始接回
-  // 結果會是 "transcript": "" 後接原本後繼欄位的部分
-  return raw.slice(0, openQuotePos + 1) + raw.slice(closeQuotePos);
+  // ── Case 2：後繼欄位不存在（JSON 在 transcript 中途被截斷）──
+  // 取 transcript 開頭引號前已解析的欄位（title、originalLanguage），
+  // 補上空 transcript 與最小合法 JSON 結尾，避免完全解析失敗。
+  const fallbackTail =
+    '", ' +
+    '"summaryText": "⚠️ NVIDIA 回應被截斷（逐字稿過長），摘要無法產生。' +
+    '建議改用 Gemini，或手動貼上字幕後重試。", ' +
+    '"segments": [], ' +
+    '"keyConcepts": [], ' +
+    '"actionItems": [], ' +
+    '"translations": {}}';
+  return raw.slice(0, openQuotePos + 1) + fallbackTail;
 }
 
 /** Fetch page text + any caption/transcript hints from a non-YouTube URL */
