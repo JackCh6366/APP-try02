@@ -171,6 +171,52 @@ function cleanTranscriptForNvidia(raw: string, maxChars = 6_000): string {
     .slice(0, maxChars);
 }
 
+/**
+ * 在 JSON.parse 之前，從 NVIDIA 原始回應字串中把 "transcript" 欄位的值挖空。
+ * 此函式使用字元層級掃描（非 regex），不依賴 JSON 是否合法，因此能處理：
+ *   - transcript 含未跳脫的雙引號（法文/英文對話引用，如 "ouais" il dit...）
+ *   - transcript 過長導致 JSON 被截斷（266K 字元等極端情況）
+ *   - NVIDIA 忽略系統指示仍輸出完整逐字稿的所有情況
+ *
+ * 策略：
+ *   1. 找到 "transcript": " 的位置（開頭引號之後）
+ *   2. 找到最近的已知後繼欄位（summaryText / segments / ...）
+ *   3. 在後繼欄位之前往回找最後一個 " 作為 transcript 的關閉引號
+ *   4. 把中間的所有內容替換成空字串，保留 JSON 結構
+ */
+function stripTranscriptFromRawJson(raw: string): string {
+  // 已知在 transcript 之後出現的欄位（依 schema 順序排列）
+  const NEXT_FIELDS = ["summaryText", "segments", "keyConcepts", "actionItems", "translations"];
+
+  // 找 "transcript" key
+  const transcriptKeyPos = raw.search(/"transcript"\s*:\s*"/);
+  if (transcriptKeyPos < 0) return raw; // 找不到，不修改
+
+  // 找 value 的開頭引號位置
+  const colonPos  = raw.indexOf(":", transcriptKeyPos);
+  if (colonPos < 0) return raw;
+  const openQuotePos = raw.indexOf('"', colonPos + 1);
+  if (openQuotePos < 0) return raw;
+
+  // 找最近的後繼欄位 key（從 openQuotePos 之後開始搜）
+  let nextFieldPos = -1;
+  for (const field of NEXT_FIELDS) {
+    const pos = raw.indexOf(`"${field}"`, openQuotePos + 1);
+    if (pos > openQuotePos && (nextFieldPos < 0 || pos < nextFieldPos)) {
+      nextFieldPos = pos;
+    }
+  }
+  if (nextFieldPos < 0) return raw; // 找不到後繼欄位
+
+  // 往回找後繼欄位之前最後一個 "，即 transcript 的關閉引號
+  const closeQuotePos = raw.lastIndexOf('"', nextFieldPos - 1);
+  if (closeQuotePos <= openQuotePos) return raw; // 關閉引號在開頭引號之前，異常
+
+  // 拼接：保留開頭引號，跳過所有內容，從關閉引號開始接回
+  // 結果會是 "transcript": "" 後接原本後繼欄位的部分
+  return raw.slice(0, openQuotePos + 1) + raw.slice(closeQuotePos);
+}
+
 /** Fetch page text + any caption/transcript hints from a non-YouTube URL */
 async function getNonYoutubeLinkContext(
   url: string
@@ -517,9 +563,20 @@ async function callNvidia(
 
   const rawText: string = json?.choices?.[0]?.message?.content ?? "";
 
-  // Strip possible markdown fences
-  const cleaned = rawText.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/, "").trim();
-  return safeParseJson(cleaned);
+  // Step 1：去除 Markdown 圍欄
+  const withoutFences = rawText
+    .replace(/^```(?:json)?\n?/i, "")
+    .replace(/\n?```$/, "")
+    .trim();
+
+  // Step 2：在 JSON.parse 之前，先把 transcript 欄位的值挖空。
+  // NVIDIA 常忽略「輸出空字串」的指示，直接把完整逐字稿寫入 transcript，
+  // 法文/英文內容含大量未跳脫雙引號，導致解析失敗。
+  // stripTranscriptFromRawJson 以字元掃描法直接剷除該欄位值，
+  // 不依賴 JSON 是否合法，之後再由後端注入正確的 transcript。
+  const stripped = stripTranscriptFromRawJson(withoutFences);
+
+  return safeParseJson(stripped);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
