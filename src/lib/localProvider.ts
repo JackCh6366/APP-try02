@@ -91,6 +91,50 @@ ${textTranscript.slice(0, 30000)}
 請直接輸出 JSON，不要有任何前後綴文字。`;
 }
 
+// ── 修正 AI 回應中常見的「JSON 字串內夾帶原始控制字元」問題（與後端邏輯一致）──
+function sanitizeJsonControlChars(text: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const code = text.charCodeAt(i);
+
+    if (inString) {
+      if (escaped) {
+        result += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        result += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        result += ch;
+        continue;
+      }
+      if (code < 0x20) {
+        switch (ch) {
+          case "\n": result += "\\n"; break;
+          case "\r": result += "\\r"; break;
+          case "\t": result += "\\t"; break;
+          default: result += "\\u" + code.toString(16).padStart(4, "0");
+        }
+        continue;
+      }
+      result += ch;
+    } else {
+      if (ch === '"') inString = true;
+      result += ch;
+    }
+  }
+  return result;
+}
+
 // ── 嘗試從可能包含雜訊的回應中解析出 JSON ──────────────────────────────
 function extractJSON(text: string): any {
   let cleaned = text.trim();
@@ -98,7 +142,7 @@ function extractJSON(text: string): any {
   const firstBrace = cleaned.indexOf("{");
   const lastBrace = cleaned.lastIndexOf("}");
   if (firstBrace === -1 || lastBrace === -1) throw new Error("回應中找不到有效的 JSON 結構");
-  cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  cleaned = sanitizeJsonControlChars(cleaned.slice(firstBrace, lastBrace + 1));
   try {
     return JSON.parse(cleaned);
   } catch {

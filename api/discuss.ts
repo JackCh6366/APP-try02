@@ -75,9 +75,57 @@ function buildPrompt(body: DiscussBody): string {
   return `【目前分析結果】\n${buildContext(body.currentResult)}\n\n【對話記錄】\n${history || "（第一次討論）"}\n\n【使用者訊息】\n${body.userMessage}`;
 }
 
+/**
+ * 修正 AI 模型回應中常見的「JSON 字串欄位內夾帶原始控制字元（如真正換行）」問題。
+ * 與 api/generate.ts 中的同名邏輯一致：只在字串內部才把控制字元轉成合法跳脫序列。
+ */
+function sanitizeJsonControlChars(text: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const code = text.charCodeAt(i);
+
+    if (inString) {
+      if (escaped) {
+        result += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        result += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        result += ch;
+        continue;
+      }
+      if (code < 0x20) {
+        switch (ch) {
+          case "\n": result += "\\n"; break;
+          case "\r": result += "\\r"; break;
+          case "\t": result += "\\t"; break;
+          default: result += "\\u" + code.toString(16).padStart(4, "0");
+        }
+        continue;
+      }
+      result += ch;
+    } else {
+      if (ch === '"') inString = true;
+      result += ch;
+    }
+  }
+  return result;
+}
+
 function parseJson(raw: string): any {
   let text = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
   text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  text = sanitizeJsonControlChars(text);
   try { return JSON.parse(text); } catch {
     const s = text.indexOf("{"), e = text.lastIndexOf("}");
     if (s < 0 || e <= s) throw new Error("AI 回應中找不到有效 JSON。");

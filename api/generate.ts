@@ -35,6 +35,71 @@ function isYoutubeUrl(url: string): boolean {
   return /(?:youtube\.com\/(?:watch|shorts|embed)|youtu\.be\/)/.test(url);
 }
 
+/**
+ * 修正 AI 模型回應中常見的「JSON 字串欄位內夾帶原始控制字元（如真正換行）」問題。
+ * JSON 規範要求字串內的換行/Tab 等控制字元必須跳脫為 \n / \t，但 LLM 常常直接輸出原始字元，
+ * 導致 JSON.parse 丟出 "Bad control character in string literal" 錯誤。
+ * 這裡用簡單的狀態機掃描：只在「目前位於字串內」時，才把控制字元轉成合法跳脫序列，
+ * 字串外的空白/換行（本來就合法）不受影響。
+ */
+function sanitizeJsonControlChars(text: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const code = text.charCodeAt(i);
+
+    if (inString) {
+      if (escaped) {
+        result += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        result += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        result += ch;
+        continue;
+      }
+      if (code < 0x20) {
+        switch (ch) {
+          case "\n": result += "\\n"; break;
+          case "\r": result += "\\r"; break;
+          case "\t": result += "\\t"; break;
+          default: result += "\\u" + code.toString(16).padStart(4, "0");
+        }
+        continue;
+      }
+      result += ch;
+    } else {
+      if (ch === '"') inString = true;
+      result += ch;
+    }
+  }
+  return result;
+}
+
+/** 安全解析 AI 回傳的 JSON：先清洗控制字元，失敗時再嘗試擷取 {...} 區間重試一次 */
+function safeParseJson(raw: string): any {
+  const cleaned = sanitizeJsonControlChars(raw);
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return JSON.parse(cleaned.slice(start, end + 1));
+    }
+    throw err;
+  }
+}
+
 /** Fetch page text + any caption/transcript hints from a non-YouTube URL */
 async function getNonYoutubeLinkContext(
   url: string
@@ -82,9 +147,8 @@ async function getNonYoutubeLinkContext(
 // ─────────────────────────────────────────────────────────────────────────────
 // buildGeminiContents
 // link 模式分兩條路：
-//   1. YouTube URL → 以純文字把 URL 嵌入 prompt，Gemini 原生識別並分析影音
-//      ⚠️ 不可用 fileData.fileUri 傳 YouTube 連結，那是 File API 上傳路徑，
-//         直接傳 YouTube URL 會導致 Gemini API 400 INVALID_ARGUMENT 錯誤。
+//   1. YouTube URL → 使用官方 fileData.fileUri 結構化格式，讓 Gemini 真正讀取影片內容
+//      （2026/07 修正：先前誤用純文字嵌入 URL，導致模型完全沒有存取影片、憑空生成內容）
 //   2. 一般 URL    → 維持原本抓 meta + 字幕的方式
 // ─────────────────────────────────────────────────────────────────────────────
 async function buildGeminiContents(body: GenerateBody) {
@@ -100,13 +164,23 @@ async function buildGeminiContents(body: GenerateBody) {
       throw new Error("Please provide a valid media URL.");
     }
 
-    // ── YouTube：以純文字 URL 嵌入 prompt，Gemini 模型原生支援 YouTube 連結理解 ──
-    // NOTE: fileData.fileUri 僅適用於 Gemini File API 已上傳的檔案或公開二進位 URL，
-    //       不可用於 YouTube 連結，否則 API 回傳 400 Invalid Argument。
+    // ── YouTube：改用官方正確的 fileData.fileUri 結構化格式 ──
+    // 依據 Google 官方文件（ai.google.dev/gemini-api/docs/video-understanding），
+    // 這是唯一能讓 Gemini「真正讀取」YouTube 影片內容的方式。
+    // ⚠️ 修正說明：先前版本把 YouTube 網址當成純文字塞進 prompt 裡，
+    //    這樣 Gemini 完全沒有機會存取影片內容，只會根據文字脈絡憑空生成內容（幻覺），
+    //    導致回傳結果與影片實際內容完全不符。正確做法必須用 fileData 欄位傳遞。
+    //    最佳實踐：文字提示應放在影片 part 之後（見官方文件 best practices）。
     if (isYoutubeUrl(body.videoLink)) {
       return [
         {
-          text: `Please analyze the following YouTube video in full detail.\nYouTube URL: ${body.videoLink}\n\nTranscribe and summarize the audio/spoken content as thoroughly as possible.`,
+          fileData: {
+            fileUri: body.videoLink,
+            mimeType: "video/*",
+          },
+        },
+        {
+          text: `Please analyze this YouTube video in full detail. Transcribe and summarize the audio/spoken content as thoroughly as possible, based on what is actually said and shown in the video.`,
         },
       ];
     }
@@ -238,7 +312,7 @@ async function callGemini(
     );
   }
 
-  return JSON.parse(rawText);
+  return safeParseJson(rawText);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -282,7 +356,7 @@ async function callNvidia(
 
   // Strip possible markdown fences
   const cleaned = rawText.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/, "").trim();
-  return JSON.parse(cleaned);
+  return safeParseJson(cleaned);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
