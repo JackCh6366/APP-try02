@@ -185,8 +185,6 @@ function cleanTranscriptForNvidia(raw: string, maxChars = 6_000): string {
  *   4. 把中間的所有內容替換成空字串，保留 JSON 結構
  */
 function stripTranscriptFromRawJson(raw: string): string {
-  const NEXT_FIELDS = ["summaryText", "segments", "keyConcepts", "actionItems", "translations"];
-
   const transcriptKeyPos = raw.search(/"transcript"\s*:\s*"/);
   if (transcriptKeyPos < 0) return raw;
 
@@ -195,25 +193,25 @@ function stripTranscriptFromRawJson(raw: string): string {
   const openQuotePos = raw.indexOf('"', colonPos + 1);
   if (openQuotePos < 0) return raw;
 
-  let nextFieldPos = -1;
-  for (const field of NEXT_FIELDS) {
-    const pos = raw.indexOf(`"${field}"`, openQuotePos + 1);
-    if (pos > openQuotePos && (nextFieldPos < 0 || pos < nextFieldPos)) {
-      nextFieldPos = pos;
-    }
+  // ── 字元掃描法找真正的關閉引號 ──
+  // 舊版用 lastIndexOf('"', nextFieldPos) 在逐字稿含未跳脫 " 時會找錯位置，
+  // 導致 81588 字元的逐字稿原封不動送入 JSON.parse 而失敗。
+  // 正確做法：逐字掃描，遇 \ 跳過下一字元，遇 " 即為真正結尾。
+  let i = openQuotePos + 1;
+  let closeQuotePos = -1;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === "\\") { i += 2; continue; }  // 跳脫序列 \n \t \" \\ 等
+    if (ch === '"')  { closeQuotePos = i; break; }
+    i++;
   }
 
-  if (nextFieldPos >= 0) {
-    // ── Case 1：後繼欄位存在（JSON 完整，但 transcript 內有未跳脫引號）──
-    const closeQuotePos = raw.lastIndexOf('"', nextFieldPos - 1);
-    if (closeQuotePos > openQuotePos) {
-      return raw.slice(0, openQuotePos + 1) + raw.slice(closeQuotePos);
-    }
+  if (closeQuotePos > openQuotePos) {
+    // 找到真正的關閉引號：把 transcript 值清空為 ""
+    return raw.slice(0, openQuotePos + 1) + raw.slice(closeQuotePos);
   }
 
-  // ── Case 2：後繼欄位不存在（JSON 在 transcript 中途被截斷）──
-  // 取 transcript 開頭引號前已解析的欄位（title、originalLanguage），
-  // 補上空 transcript 與最小合法 JSON 結尾，避免完全解析失敗。
+  // ── 找不到關閉引號：JSON 在 transcript 中途被截斷 ──
   const fallbackTail =
     '", ' +
     '"summaryText": "⚠️ NVIDIA 回應被截斷（逐字稿過長），摘要無法產生。' +
