@@ -105,19 +105,51 @@ function sanitizeJsonControlChars(text: string): string {
   return result;
 }
 
-/** 安全解析 AI 回傳的 JSON：先清洗控制字元，失敗時再嘗試擷取 {...} 區間重試一次 */
+/**
+ * 安全解析 AI 回傳的 JSON。
+ * 採用五道漸進式修復策略：
+ *   1. 直接解析（最佳情況）
+ *   2. 清洗控制字元後解析
+ *   3. 去除 Markdown 圍欄 + 清洗控制字元
+ *   4. 移除尾隨逗號 + 清洗控制字元
+ *   5. 擷取第一個 {...} 區塊後再次嘗試以上所有策略
+ */
 function safeParseJson(raw: string): any {
-  const cleaned = sanitizeJsonControlChars(raw);
-  try {
-    return JSON.parse(cleaned);
-  } catch (err) {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      return JSON.parse(cleaned.slice(start, end + 1));
-    }
-    throw err;
+  // 移除 Markdown 圍欄（```json ... ```）
+  const stripFences = (s: string) =>
+    s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+
+  // 移除 JSON 中的尾隨逗號（,} 或 ,]）
+  const stripTrailingCommas = (s: string) =>
+    s.replace(/,(?:\s*)([\/}\]])/g, "$1");
+
+  const prepare = (s: string) =>
+    stripTrailingCommas(sanitizeJsonControlChars(stripFences(s)));
+
+  const candidates = [
+    raw,
+    sanitizeJsonControlChars(raw),
+    prepare(raw),
+  ];
+
+  for (const candidate of candidates) {
+    try { return JSON.parse(candidate); } catch { /* 繼續下一個策略 */ }
   }
+
+  // 最後手段：擷取最外層的 {...} 區塊
+  const base = prepare(raw);
+  const start = base.indexOf("{");
+  const end   = base.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const slice = base.slice(start, end + 1);
+    try { return JSON.parse(slice); } catch { /* 放棄 */ }
+  }
+
+  // 所有策略均失敗，拋出最原始的錯誤以供除錯
+  throw new SyntaxError(
+    `Failed to parse AI JSON response. Length=${raw.length}. ` +
+    `Preview: ${raw.slice(0, 200)}`
+  );
 }
 
 /** Fetch page text + any caption/transcript hints from a non-YouTube URL */
@@ -337,16 +369,54 @@ Always include the Traditional Chinese summary in "summaryText".`;
 async function callGemini(
   contents: any[],
   systemPrompt: string,
-  apiKey: string
+  apiKey: string,
+  options: SummaryOptions
 ): Promise<any> {
   const MODEL = "gemini-2.5-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
+
+  // ── 結構化輸出 Schema（強制 Gemini 產生合法 JSON，根本解決解析錯誤）──
+  // 動態組建 translations 的 properties，避免空物件導致 API 拒絕
+  const nonZhLangs = (options.targetLanguages ?? []).filter(l => l !== "zh");
+  const translationProps: Record<string, { type: string }> = {};
+  for (const lang of nonZhLangs) translationProps[lang] = { type: "STRING" };
+
+  const responseSchema = {
+    type: "OBJECT",
+    properties: {
+      title:            { type: "STRING" },
+      originalLanguage: { type: "STRING" },
+      transcript:       { type: "STRING" },
+      summaryText:      { type: "STRING" },
+      segments: {
+        type: "ARRAY",
+        items: {
+          type: "OBJECT",
+          properties: {
+            title:     { type: "STRING" },
+            timeRange: { type: "STRING" },
+            summary:   { type: "STRING" },
+          },
+        },
+      },
+      keyConcepts: { type: "ARRAY", items: { type: "STRING" } },
+      actionItems:  { type: "ARRAY", items: { type: "STRING" } },
+      translations: {
+        type: "OBJECT",
+        properties: Object.keys(translationProps).length > 0
+          ? translationProps
+          : { _placeholder: { type: "STRING" } },
+      },
+    },
+    required: ["title", "originalLanguage", "transcript", "summaryText", "segments", "keyConcepts", "actionItems", "translations"],
+  };
 
   const body = {
     contents: [{ role: "user", parts: contents }],
     systemInstruction: { parts: [{ text: systemPrompt }] },
     generationConfig: {
       responseMimeType: "application/json",
+      responseSchema,
       temperature: 0.2,
     },
   };
@@ -477,24 +547,33 @@ export default async function handler(req: any, res: any) {
           }
 
           if (transcriptText) {
-            // 有字幕：品質最佳路徑
+            // ── 有字幕：品質最佳路徑，直接送 NVIDIA 分析 ──
             textContent = `YouTube URL: ${cleanUrl}\n\n字幕內容（逐字稿）：\n${transcriptText}`;
           } else {
-            // 無字幕：從 YouTube 頁面擷取 metadata，讓模型根據標題/描述/既有知識生成總結
-            const meta = await getYoutubePageMetadata(cleanUrl);
-            const metaBlock = [
-              meta.title       ? `影片標題：${meta.title}`       : "",
-              meta.channel     ? `頻道名稱：${meta.channel}`     : "",
-              meta.description ? `影片描述：${meta.description}` : "",
-            ].filter(Boolean).join("\n");
+            // ── 無字幕：NVIDIA 純文字模型無法讀取影音，自動切換 Gemini 分析 ──
+            // 讓純文字模型僅憑標題/描述猜測內容，會產生與影片實際內容不符的錯誤資訊。
+            // 正確做法：自動 fallback 到 Gemini（能直接讀取 YouTube 音訊），確保結果準確。
+            const geminiKey = process.env.GEMINI_API_KEY;
+            if (!geminiKey) {
+              return res.status(422).json({
+                success: false,
+                error:
+                  "此 YouTube 影片沒有可用字幕，NVIDIA 無法讀取音訊；自動切換 Gemini 時亦發現 GEMINI_API_KEY 未設定。" +
+                  "請設定 GEMINI_API_KEY 環境變數，或手動貼上字幕後再使用 NVIDIA 分析。",
+              });
+            }
 
-            textContent = [
-              `YouTube URL: ${cleanUrl}`,
-              "",
-              metaBlock || "（無法取得影片 metadata）",
-              "",
-              "注意：此影片無可用官方字幕。請根據以上標題、描述及你對此影片/頻道的既有知識，盡可能生成完整且準確的內容摘要。若無法確認細節，請誠實標注為推測內容。",
-            ].join("\n");
+            // 直接以 Gemini 分析影片，回傳時標示實際使用的模型
+            const geminiContents = await buildGeminiContents({
+              ...body,
+              videoLink: cleanUrl,
+            });
+            const geminiResult = await callGemini(geminiContents, systemPrompt, geminiKey, options);
+            return res.status(200).json({
+              success: true,
+              result: geminiResult,
+              usedModel: "gemini-2.5-flash (auto-fallback: no transcript available for NVIDIA)",
+            });
           }
         } else {
           const ctx = await getNonYoutubeLinkContext(body.videoLink);
@@ -522,7 +601,7 @@ export default async function handler(req: any, res: any) {
     }
 
     const contents = await buildGeminiContents(body);
-    const result = await callGemini(contents, systemPrompt, apiKey);
+    const result = await callGemini(contents, systemPrompt, apiKey, options);
 
     return res.status(200).json({
       success: true,
