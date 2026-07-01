@@ -645,12 +645,30 @@ export default async function handler(req: any, res: any) {
 
           try {
             const { YoutubeTranscript } = await import("youtube-transcript");
-            const segments = await YoutubeTranscript.fetchTranscript(cleanUrl, { lang: "zh-TW" })
-              .catch(() => YoutubeTranscript.fetchTranscript(cleanUrl));
-            const rawTranscript = segments.map((s: any) => s.text).join(" ");
+
+            // 依序嘗試各語言字幕，確保能取得任何可用字幕（如影片只有 fr 字幕）
+            // zh-TW → zh → en → 不指定語言（讓 API 回傳第一個可用語言）
+            const LANG_FALLBACKS = ["zh-TW", "zh", "en"];
+            let segments: any[] | null = null;
+
+            for (const lang of LANG_FALLBACKS) {
+              try {
+                segments = await YoutubeTranscript.fetchTranscript(cleanUrl, { lang });
+                if (segments?.length) break;
+              } catch {
+                // 該語言不存在，繼續嘗試下一個
+              }
+            }
+
+            // 全部語言都失敗 → 不指定語言，讓 API 回傳第一個可用語言（如 fr、de 等）
+            if (!segments?.length) {
+              segments = await YoutubeTranscript.fetchTranscript(cleanUrl);
+            }
+
+            const rawTranscript = (segments ?? []).map((s: any) => s.text).join(" ");
             if (rawTranscript.trim()) transcriptText = cleanTranscriptForNvidia(rawTranscript);
           } catch {
-            // 字幕不可用，將降級使用頁面 metadata
+            // 字幕完全不可用（無字幕影片或 API 封鎖），將降級使用頁面 metadata
           }
 
           if (transcriptText) {
