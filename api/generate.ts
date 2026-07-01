@@ -249,7 +249,7 @@ async function callNvidia(
   systemPrompt: string,
   apiKey: string
 ): Promise<any> {
-  const MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1";
+  const MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5";
   const url = "https://integrate.api.nvidia.com/v1/chat/completions";
 
   const res = await fetch(url, {
@@ -324,13 +324,21 @@ export default async function handler(req: any, res: any) {
       } else if (body.mediaType === "link") {
         if (!body.videoLink?.trim()) throw new Error("Please provide a valid media URL.");
         if (isYoutubeUrl(body.videoLink)) {
-          return res.status(400).json({
-            success: false,
-            error: "NVIDIA provider does not support direct YouTube audio. Please use Gemini for YouTube links, or paste the transcript manually.",
-          });
+          // ── YouTube 連結：抓字幕後轉純文字送給 NVIDIA LLM 分析 ──
+          try {
+            const { YoutubeTranscript } = await import("youtube-transcript");
+            const segments = await YoutubeTranscript.fetchTranscript(body.videoLink, { lang: "zh-TW" })
+              .catch(() => YoutubeTranscript.fetchTranscript(body.videoLink));
+            const rawTranscript = segments.map((s: any) => s.text).join(" ");
+            textContent = `YouTube URL: ${body.videoLink}\n\n字幕內容（逐字稿）：\n${rawTranscript}`;
+          } catch {
+            // 字幕抓取失敗（無字幕、私人影片、地區限制等）→ 只傳 URL 讓模型盡力推斷
+            textContent = `YouTube URL: ${body.videoLink}\n\n（此影片無法取得字幕，請根據影片連結所有可用資訊進行分析）`;
+          }
+        } else {
+          const ctx = await getNonYoutubeLinkContext(body.videoLink);
+          textContent = `URL: ${body.videoLink}\n\nPage context:\n${ctx.pageText}\n\nTranscript:\n${ctx.transcript || "(none)"}`;
         }
-        const ctx = await getNonYoutubeLinkContext(body.videoLink);
-        textContent = `URL: ${body.videoLink}\n\nPage context:\n${ctx.pageText}\n\nTranscript:\n${ctx.transcript || "(none)"}`;
       } else {
         return res.status(400).json({
           success: false,
@@ -342,7 +350,7 @@ export default async function handler(req: any, res: any) {
       return res.status(200).json({
         success: true,
         result,
-        usedModel: "nvidia/llama-3.3-nemotron-super-49b-v1",
+        usedModel: "nvidia/llama-3.3-nemotron-super-49b-v1.5",
       });
     }
 

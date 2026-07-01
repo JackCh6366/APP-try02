@@ -55,3 +55,21 @@ export interface SummaryHistoryItem {
   mediaType: "file" | "record" | "transcript_paste" | "link";
   createdAt: string;
 }
+
+// ── 討論功能型別 ──────────────────────────────────────────────────────────────
+export interface DiscussChatTurn {
+  role: "user" | "assistant";
+  content: string;
+  hasRevision?: boolean;
+  revisedResult?: DiscussRevisedResult;
+  revisionStatus?: "pending" | "adopted" | "discarded";
+}
+
+export interface DiscussRevisedResult {
+  title: string;
+  summaryText: string;
+  sections: TopicSection[];
+  keyConcepts: string[];
+  actionItems: string[];
+  translations: Record<string, string>;
+}
