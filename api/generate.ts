@@ -556,7 +556,11 @@ async function callNvidia(
         { role: "user", content: textContent },
       ],
       temperature: 0.2,
-      max_tokens: 32768,
+      top_p: 0.95,
+      max_tokens: 65000,   // 恢復舊版設定；32768 對長字幕影片不夠用，會導致輸出截斷
+      stream: false,
+      frequency_penalty: 0,
+      presence_penalty: 0,
     }),
     signal: AbortSignal.timeout(120_000),
   });
@@ -571,13 +575,20 @@ async function callNvidia(
 
   const rawText: string = json?.choices?.[0]?.message?.content ?? "";
 
-  // Step 1：去除 Markdown 圍欄
-  const withoutFences = rawText
+  // Step 1：移除 <think>...</think> 思考區塊。
+  // Nemotron 模型在未收到 /no_think 時（或忽略指令時）會在回應前輸出思考過程，
+  // 這些內容不是合法 JSON，必須先清除才能繼續解析。
+  const withoutThink = rawText
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .trim();
+
+  // Step 2：去除 Markdown 圍欄
+  const withoutFences = withoutThink
     .replace(/^```(?:json)?\n?/i, "")
     .replace(/\n?```$/, "")
     .trim();
 
-  // Step 2：在 JSON.parse 之前，先把 transcript 欄位的值挖空。
+  // Step 3：在 JSON.parse 之前，先把 transcript 欄位的值挖空。
   // NVIDIA 常忽略「輸出空字串」的指示，直接把完整逐字稿寫入 transcript，
   // 法文/英文內容含大量未跳脫雙引號，導致解析失敗。
   // stripTranscriptFromRawJson 以字元掃描法直接剷除該欄位值，
@@ -614,7 +625,8 @@ export default async function handler(req: any, res: any) {
 
     // ── NVIDIA path (text-only) ──
     if (provider === "nvidia") {
-      const nvidiaSystemPrompt = buildSystemPrompt(options, "nvidia");
+      // /no_think：關閉 Nemotron 模型的思考模式，避免輸出 <think>...</think> 區塊導致 JSON 解析失敗
+      const nvidiaSystemPrompt = "/no_think\n\n" + buildSystemPrompt(options, "nvidia");
       const apiKey = process.env.NVIDIA_API_KEY;
       if (!apiKey) {
         return res.status(500).json({ success: false, error: "NVIDIA_API_KEY not configured." });
