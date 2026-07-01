@@ -368,14 +368,9 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
         alert("請輸入包含 http:// 或 https:// 的完整網路連結位址！");
         return;
       }
-      // ── YouTube + NVIDIA 不相容：前端自動改用 Gemini 並提示 ──
-      let effectiveProvider = provider;
-      if (provider === "nvidia" && isYoutubeUrl(videoLink)) {
-        alert("YouTube 連結需使用 Google Gemini 進行音訊分析。\n已自動將提供商切換為 Gemini，請再試一次。");
-        setProvider("gemini");
-        return; // 讓使用者看到切換後再次確認送出
-      }
-      onProcess({ provider: effectiveProvider, mediaType: "link", videoLink: videoLink.trim(), fileName: videoLink.trim(), options, localConfig });
+      // ── NVIDIA + YouTube：模型為純文字模型，無法直接讀取音訊，
+      //    後端會改用 YouTube 字幕擷取後以文字方式分析（非真正聽音檔）──
+      onProcess({ provider, mediaType: "link", videoLink: videoLink.trim(), fileName: videoLink.trim(), options, localConfig });
     }
   };
 
@@ -660,20 +655,24 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
               </div>
             )}
 
-            {/* NVIDIA + YouTube 不相容警告 */}
+            {/* NVIDIA + YouTube：說明改用字幕文字分析（非直接聽音訊） */}
             {provider === "nvidia" && isYoutubeUrl(videoLink) && (
-              <div className="flex items-start space-x-2.5 rounded-xl bg-amber-50 border border-amber-300 p-4 text-xs text-amber-900">
-                <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
-                <div className="space-y-1.5">
-                  <p className="font-bold">⚠️ NVIDIA 不支援直接分析 YouTube 連結</p>
-                  <p className="leading-normal">YouTube 影音需透過 <strong>Google Gemini</strong> 才能直接讀取音訊。</p>
+              <div className="flex items-start space-x-2.5 rounded-xl bg-indigo-50/40 border border-indigo-100 p-4 text-xs text-indigo-800">
+                <Globe className="h-4 w-4 text-indigo-500 shrink-0 mt-0.5" />
+                <div className="space-y-1.5 font-medium">
+                  <p className="font-bold">📝 NVIDIA・字幕文字分析模式</p>
+                  <p className="text-slate-600 leading-normal">
+                    NVIDIA 為純文字模型，無法直接讀取音訊。系統將自動擷取此 YouTube 影片的官方字幕文字後進行分析，
+                    若該影片沒有提供字幕，分析可能會失敗或不準確。若需要不依賴字幕、直接分析影片音訊的模式，建議改用
+                    <strong> Google Gemini</strong>。
+                  </p>
                   <button
                     type="button"
                     onClick={() => setProvider("gemini")}
-                    className="inline-flex items-center space-x-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold rounded-lg transition-all cursor-pointer"
+                    className="inline-flex items-center space-x-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold rounded-lg transition-all cursor-pointer"
                   >
                     <Sparkles className="h-3 w-3" />
-                    <span>切換為 Google Gemini</span>
+                    <span>改用 Google Gemini（直接讀音訊）</span>
                   </button>
                 </div>
               </div>
@@ -738,7 +737,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
               <div className="space-y-1.5">
                 {[
                   { value: "gemini" as AIProvider, label: "Google Gemini", sub: "gemini-2.5-flash-lite" },
-                  { value: "nvidia" as AIProvider, label: "NVIDIA", sub: "文字用 Nemotron 49B・音訊用 Omni" },
+                  { value: "nvidia" as AIProvider, label: "NVIDIA", sub: "純文字模型・Nemotron 49B" },
                   { value: "local" as AIProvider, label: "本地模型", sub: "Ollama / LM Studio（在你電腦執行）" },
                 ].map(({ value, label, sub }) => (
                   <label key={value} className="flex items-center p-2 rounded-lg bg-white border border-slate-100 hover:border-slate-300 cursor-pointer transition-all">
@@ -754,7 +753,7 @@ export default function MediaInput({ onProcess, isLoading }: MediaInputProps) {
               {provider === "nvidia" && (
                 <div className="flex items-start space-x-2 text-[10px] text-slate-500 bg-white border border-slate-100 rounded-lg p-2">
                   <Cpu className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                  <span>支援上傳音訊檔案、文字稿與連結。單檔建議在 15MB 內以確保穩定處理（大型影片請改用 Gemini）。</span>
+                  <span>此為純文字模型，無法直接讀取音訊/影片內容。支援：貼上文字稿、YouTube 連結（自動擷取官方字幕分析）、一般網頁連結。上傳音訊/影片檔案或現場錄音請改用 Google Gemini。</span>
                 </div>
               )}
               {provider === "local" && (
