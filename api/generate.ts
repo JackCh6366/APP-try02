@@ -152,6 +152,25 @@ function safeParseJson(raw: string): any {
   );
 }
 
+/**
+ * 清洗字幕內容以供 NVIDIA 純文字模型使用。
+ * 圖 YouTube 字幕 API 回傳的 SRT 時間第記與序號行，
+ * 若不清除會讓模型從 SRT 格式隻返透字逗底，導致回傳 JSON 被截斷。
+ * 輸出最多 10,000 字元，避免推理上下文太長導致回傳 JSON 截斷。
+ */
+function cleanTranscriptForNvidia(raw: string, maxChars = 10_000): string {
+  return raw
+    // 移除 SRT 時間第記（如 00:00:00,000 --> 00:02:50,000）
+    .replace(/\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/g, "")
+    // 移除純數字的序號行
+    .replace(/^\d+\s*$/gm, "")
+    // 收縮多餘空行
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    // 切除超長內容
+    .slice(0, maxChars);
+}
+
 /** Fetch page text + any caption/transcript hints from a non-YouTube URL */
 async function getNonYoutubeLinkContext(
   url: string
@@ -310,9 +329,11 @@ async function buildGeminiContents(body: GenerateBody) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// System prompt builder
+// System prompt builders
+// Gemini 版：要求完整逐字稿（Gemini 能直接讀影音，輸出不受 token 限制影音）
+// NVIDIA 版：要求簡潔整理版逐字稿（純文字模型內容已給定，輸出必須控制在 token 限制內）
 // ─────────────────────────────────────────────────────────────────────────────
-function buildSystemPrompt(options: SummaryOptions): string {
+function buildSystemPrompt(options: SummaryOptions, provider: "gemini" | "nvidia" = "gemini"): string {
   const langMap: Record<string, string> = {
     zh: "Traditional Chinese (繁體中文)",
     en: "English",
@@ -331,6 +352,13 @@ function buildSystemPrompt(options: SummaryOptions): string {
       ? "Pay special attention to action items, decisions, tasks, and commitments mentioned."
       : "Focus on key takeaways, insights, and the most important concepts.";
 
+  // NVIDIA 限制：transcript 欄位只需輸出整理後的乾淨版本，不可原樣複製輸入的字幕文字
+  // 原因：輸入的字幕可能長達數萬字，若原樣複製到 transcript 欄位，加上其他欄位，
+  //       整個 JSON 回應會超過 max_tokens，導致 JSON 被截斷而無法解析。
+  const transcriptInstruction = provider === "nvidia"
+    ? `"transcript": "string — 整理後的乾淨逐字稿（去除時間戳記、合併成自然段落、最多 800 字）"`
+    : `"transcript": "string — full verbatim transcription of spoken content (Traditional Chinese preferred if originally in Chinese; otherwise keep original language)"`;
+
   return `You are an expert multilingual media analyst and transcription specialist.
 Your task is to analyze the provided audio/video/transcript content and return a structured JSON response.
 
@@ -342,7 +370,7 @@ You MUST respond with ONLY valid JSON (no markdown fences, no prose), matching t
 {
   "title": "string — concise title for this content",
   "originalLanguage": "string — detected primary spoken/written language",
-  "transcript": "string — full verbatim transcription of spoken content (Traditional Chinese preferred if originally in Chinese; otherwise keep original language)",
+  ${transcriptInstruction},
   "summaryText": "string — comprehensive summary in Traditional Chinese (繁體中文)",
   "segments": [
     {
@@ -473,7 +501,7 @@ async function callNvidia(
         { role: "user", content: textContent },
       ],
       temperature: 0.2,
-      max_tokens: 8192,
+      max_tokens: 32768,
     }),
     signal: AbortSignal.timeout(120_000),
   });
@@ -520,6 +548,7 @@ export default async function handler(req: any, res: any) {
 
     // ── NVIDIA path (text-only) ──
     if (provider === "nvidia") {
+      const nvidiaSystemPrompt = buildSystemPrompt(options, "nvidia");
       const apiKey = process.env.NVIDIA_API_KEY;
       if (!apiKey) {
         return res.status(500).json({ success: false, error: "NVIDIA_API_KEY not configured." });
@@ -541,7 +570,7 @@ export default async function handler(req: any, res: any) {
             const segments = await YoutubeTranscript.fetchTranscript(cleanUrl, { lang: "zh-TW" })
               .catch(() => YoutubeTranscript.fetchTranscript(cleanUrl));
             const rawTranscript = segments.map((s: any) => s.text).join(" ");
-            if (rawTranscript.trim()) transcriptText = rawTranscript;
+            if (rawTranscript.trim()) transcriptText = cleanTranscriptForNvidia(rawTranscript);
           } catch {
             // 字幕不可用，將降級使用頁面 metadata
           }
@@ -586,7 +615,7 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      const result = await callNvidia(textContent, systemPrompt, apiKey);
+      const result = await callNvidia(textContent, nvidiaSystemPrompt, apiKey);
       return res.status(200).json({
         success: true,
         result,
