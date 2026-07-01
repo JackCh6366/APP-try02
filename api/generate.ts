@@ -36,6 +36,26 @@ function isYoutubeUrl(url: string): boolean {
 }
 
 /**
+ * 從任何形式的 YouTube 網址中抽出乾淨的 11 碼影片 ID。
+ * 使用者貼上的連結常帶有播放清單（list=、start_radio=）、時間戳記（t=）、
+ * 分享追蹤碼（si=）等雜訊參數，這些複合網址會導致：
+ *   - Gemini fileData.fileUri 解析失敗 → 400 Invalid Argument
+ *   - youtube-transcript 套件抓錯影片或直接抓取失敗
+ * 因此一律先正規化成最單純的 https://www.youtube.com/watch?v=VIDEO_ID 格式再使用。
+ */
+function extractYoutubeVideoId(url: string): string | null {
+  const match = url.match(
+    /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
+  );
+  return match ? match[1] : null;
+}
+
+function cleanYoutubeUrl(url: string): string {
+  const id = extractYoutubeVideoId(url);
+  return id ? `https://www.youtube.com/watch?v=${id}` : url;
+}
+
+/**
  * 修正 AI 模型回應中常見的「JSON 字串欄位內夾帶原始控制字元（如真正換行）」問題。
  * JSON 規範要求字串內的換行/Tab 等控制字元必須跳脫為 \n / \t，但 LLM 常常直接輸出原始字元，
  * 導致 JSON.parse 丟出 "Bad control character in string literal" 錯誤。
@@ -172,10 +192,11 @@ async function buildGeminiContents(body: GenerateBody) {
     //    導致回傳結果與影片實際內容完全不符。正確做法必須用 fileData 欄位傳遞。
     //    最佳實踐：文字提示應放在影片 part 之後（見官方文件 best practices）。
     if (isYoutubeUrl(body.videoLink)) {
+      const cleanUrl = cleanYoutubeUrl(body.videoLink.trim());
       return [
         {
           fileData: {
-            fileUri: body.videoLink,
+            fileUri: cleanUrl,
             mimeType: "video/*",
           },
         },
@@ -398,16 +419,26 @@ export default async function handler(req: any, res: any) {
       } else if (body.mediaType === "link") {
         if (!body.videoLink?.trim()) throw new Error("Please provide a valid media URL.");
         if (isYoutubeUrl(body.videoLink)) {
-          // ── YouTube 連結：抓字幕後轉純文字送給 NVIDIA LLM 分析 ──
+          // ── YouTube 連結：先清洗網址，抓字幕後轉純文字送給 NVIDIA LLM 分析 ──
+          const cleanUrl = cleanYoutubeUrl(body.videoLink.trim());
           try {
             const { YoutubeTranscript } = await import("youtube-transcript");
-            const segments = await YoutubeTranscript.fetchTranscript(body.videoLink, { lang: "zh-TW" })
-              .catch(() => YoutubeTranscript.fetchTranscript(body.videoLink));
+            const segments = await YoutubeTranscript.fetchTranscript(cleanUrl, { lang: "zh-TW" })
+              .catch(() => YoutubeTranscript.fetchTranscript(cleanUrl));
             const rawTranscript = segments.map((s: any) => s.text).join(" ");
-            textContent = `YouTube URL: ${body.videoLink}\n\n字幕內容（逐字稿）：\n${rawTranscript}`;
+            if (!rawTranscript.trim()) {
+              throw new Error("empty transcript");
+            }
+            textContent = `YouTube URL: ${cleanUrl}\n\n字幕內容（逐字稿）：\n${rawTranscript}`;
           } catch {
-            // 字幕抓取失敗（無字幕、私人影片、地區限制等）→ 只傳 URL 讓模型盡力推斷
-            textContent = `YouTube URL: ${body.videoLink}\n\n（此影片無法取得字幕，請根據影片連結所有可用資訊進行分析）`;
+            // ⚠️ 修正說明：先前版本在抓不到字幕時，會讓純文字模型「只憑網址瞎猜內容」，
+            //    這樣產生的結果與影片實際內容毫無關聯（幻覺）。現在改為明確報錯，
+            //    誠實告知使用者這支影片無法用 NVIDIA 分析，請改用 Gemini（可直接讀取影音）。
+            return res.status(422).json({
+              success: false,
+              error:
+                "此 YouTube 影片沒有可用的官方字幕（或字幕擷取失敗），NVIDIA 為純文字模型、無法直接讀取音訊，因此無法分析此影片。請改用 Google Gemini 直接分析影音內容。",
+            });
           }
         } else {
           const ctx = await getNonYoutubeLinkContext(body.videoLink);
