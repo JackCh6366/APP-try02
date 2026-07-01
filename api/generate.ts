@@ -164,6 +164,49 @@ async function getNonYoutubeLinkContext(
   }
 }
 
+/**
+ * 從 YouTube 頁面的 og: meta 標籤擷取影片標題、描述與頻道名稱。
+ * 在字幕不可用時提供給純文字模型（NVIDIA）作為基礎分析素材。
+ */
+async function getYoutubePageMetadata(
+  url: string
+): Promise<{ title: string; description: string; channel: string }> {
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+      },
+    });
+    if (!res.ok) return { title: "", description: "", channel: "" };
+
+    const html = await res.text();
+
+    const titleMatch =
+      html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i) ||
+      html.match(/<title>([^<]+)<\/title>/i);
+    const title = titleMatch
+      ? titleMatch[1].replace(/ - YouTube$/, "").trim()
+      : "";
+
+    const descMatch =
+      html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i) ||
+      html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/i);
+    const description = descMatch ? descMatch[1].trim() : "";
+
+    const channelMatch =
+      html.match(/"ownerChannelName":"([^"]+)"/) ||
+      html.match(/"channelName":"([^"]+)"/);
+    const channel = channelMatch ? channelMatch[1].trim() : "";
+
+    return { title, description, channel };
+  } catch {
+    return { title: "", description: "", channel: "" };
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // buildGeminiContents
 // link 模式分兩條路：
@@ -419,26 +462,39 @@ export default async function handler(req: any, res: any) {
       } else if (body.mediaType === "link") {
         if (!body.videoLink?.trim()) throw new Error("Please provide a valid media URL.");
         if (isYoutubeUrl(body.videoLink)) {
-          // ── YouTube 連結：先清洗網址，抓字幕後轉純文字送給 NVIDIA LLM 分析 ──
+          // ── YouTube 連結：優先抓官方字幕，失敗時降級使用頁面 metadata ──
           const cleanUrl = cleanYoutubeUrl(body.videoLink.trim());
+          let transcriptText = "";
+
           try {
             const { YoutubeTranscript } = await import("youtube-transcript");
             const segments = await YoutubeTranscript.fetchTranscript(cleanUrl, { lang: "zh-TW" })
               .catch(() => YoutubeTranscript.fetchTranscript(cleanUrl));
             const rawTranscript = segments.map((s: any) => s.text).join(" ");
-            if (!rawTranscript.trim()) {
-              throw new Error("empty transcript");
-            }
-            textContent = `YouTube URL: ${cleanUrl}\n\n字幕內容（逐字稿）：\n${rawTranscript}`;
+            if (rawTranscript.trim()) transcriptText = rawTranscript;
           } catch {
-            // ⚠️ 修正說明：先前版本在抓不到字幕時，會讓純文字模型「只憑網址瞎猜內容」，
-            //    這樣產生的結果與影片實際內容毫無關聯（幻覺）。現在改為明確報錯，
-            //    誠實告知使用者這支影片無法用 NVIDIA 分析，請改用 Gemini（可直接讀取影音）。
-            return res.status(422).json({
-              success: false,
-              error:
-                "此 YouTube 影片沒有可用的官方字幕（或字幕擷取失敗），NVIDIA 為純文字模型、無法直接讀取音訊，因此無法分析此影片。請改用 Google Gemini 直接分析影音內容。",
-            });
+            // 字幕不可用，將降級使用頁面 metadata
+          }
+
+          if (transcriptText) {
+            // 有字幕：品質最佳路徑
+            textContent = `YouTube URL: ${cleanUrl}\n\n字幕內容（逐字稿）：\n${transcriptText}`;
+          } else {
+            // 無字幕：從 YouTube 頁面擷取 metadata，讓模型根據標題/描述/既有知識生成總結
+            const meta = await getYoutubePageMetadata(cleanUrl);
+            const metaBlock = [
+              meta.title       ? `影片標題：${meta.title}`       : "",
+              meta.channel     ? `頻道名稱：${meta.channel}`     : "",
+              meta.description ? `影片描述：${meta.description}` : "",
+            ].filter(Boolean).join("\n");
+
+            textContent = [
+              `YouTube URL: ${cleanUrl}`,
+              "",
+              metaBlock || "（無法取得影片 metadata）",
+              "",
+              "注意：此影片無可用官方字幕。請根據以上標題、描述及你對此影片/頻道的既有知識，盡可能生成完整且準確的內容摘要。若無法確認細節，請誠實標注為推測內容。",
+            ].join("\n");
           }
         } else {
           const ctx = await getNonYoutubeLinkContext(body.videoLink);
