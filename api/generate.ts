@@ -158,7 +158,7 @@ function safeParseJson(raw: string): any {
  * 若不清除會讓模型從 SRT 格式隻返透字逗底，導致回傳 JSON 被截斷。
  * 輸出最多 10,000 字元，避免推理上下文太長導致回傳 JSON 截斷。
  */
-function cleanTranscriptForNvidia(raw: string, maxChars = 10_000): string {
+function cleanTranscriptForNvidia(raw: string, maxChars = 6_000): string {
   return raw
     // 移除 SRT 時間第記（如 00:00:00,000 --> 00:02:50,000）
     .replace(/\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/g, "")
@@ -352,11 +352,12 @@ function buildSystemPrompt(options: SummaryOptions, provider: "gemini" | "nvidia
       ? "Pay special attention to action items, decisions, tasks, and commitments mentioned."
       : "Focus on key takeaways, insights, and the most important concepts.";
 
-  // NVIDIA 限制：transcript 欄位只需輸出整理後的乾淨版本，不可原樣複製輸入的字幕文字
-  // 原因：輸入的字幕可能長達數萬字，若原樣複製到 transcript 欄位，加上其他欄位，
-  //       整個 JSON 回應會超過 max_tokens，導致 JSON 被截斷而無法解析。
+  // NVIDIA 的 transcript 欄位：
+  // 強制輸出空字串 ""，由後端自行填入已清洗的輸入字幕。
+  // 原因：模型若輸出完整逐字稿，法文/英文內容常含未跳脫的雙引號（如對話引用），
+  //       導致 JSON 結構損毀無法解析。字幕已在輸入中，無需再複製到輸出。
   const transcriptInstruction = provider === "nvidia"
-    ? `"transcript": "string — 整理後的乾淨逐字稿（去除時間戳記、合併成自然段落、最多 800 字）"`
+    ? `"transcript": "" (IMPORTANT: always output empty string for this field — transcript is injected separately)`
     : `"transcript": "string — full verbatim transcription of spoken content (Traditional Chinese preferred if originally in Chinese; otherwise keep original language)"`;
 
   return `You are an expert multilingual media analyst and transcription specialist.
@@ -577,6 +578,8 @@ export default async function handler(req: any, res: any) {
 
           if (transcriptText) {
             // ── 有字幕：品質最佳路徑，直接送 NVIDIA 分析 ──
+            // transcriptText 已清洗（無 SRT 時間戳記、限 6000 字元）
+            // 後端稍後會把完整字幕注入到 result.transcript，不依賴模型複製
             textContent = `YouTube URL: ${cleanUrl}\n\n字幕內容（逐字稿）：\n${transcriptText}`;
           } else {
             // ── 無字幕：NVIDIA 純文字模型無法讀取影音，自動切換 Gemini 分析 ──
@@ -615,7 +618,24 @@ export default async function handler(req: any, res: any) {
         });
       }
 
+      // transcript_paste 模式的輸入逐字稿也存到變數供後續注入
+      const nvidiaInputTranscript =
+        body.mediaType === "transcript_paste" ? (body.textTranscript || "") : "";
+
       const result = await callNvidia(textContent, nvidiaSystemPrompt, apiKey);
+
+      // NVIDIA 被指示輸出空的 transcript 欄位。
+      // 在此注入已清洗的輸入字幕，讓前端能正常顯示逐字稿。
+      if (result && typeof result === "object") {
+        result.transcript = body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink)
+          ? cleanTranscriptForNvidia(
+              // 重新清洗以確保字元一致（transcriptText 可能因 scope 已釋放，從 textContent 取回）
+              textContent.replace(/^YouTube URL:.*?\n\n字幕內容（逐字稿）：\n/s, "").trim(),
+              20_000
+            )
+          : nvidiaInputTranscript;
+      }
+
       return res.status(200).json({
         success: true,
         result,
