@@ -122,6 +122,8 @@ function repairAndExtractJson(raw: string): string {
   let arrayDepth = 0;
   let objectDepth = 0;
   const contextStack: ("OBJECT" | "ARRAY")[] = [];
+  
+  let lastKeyStartIndex = -1;
 
   function peekNextNonWhitespace(str: string, startIndex: number) {
     for (let i = startIndex; i < str.length; i++) {
@@ -134,19 +136,19 @@ function repairAndExtractJson(raw: string): string {
 
   function isValidClosingQuote(str: string, index: number, currentContext: "OBJECT" | "ARRAY") {
     const next = peekNextNonWhitespace(str, index + 1);
-    if (!next.char) return false;
+    if (!next.char) return true; // 截斷在引號處，視為合法的結束引號
 
     if (currentContext === "OBJECT") {
       if (next.char === '}') return true;
       if (next.char === ',') {
         const afterComma = peekNextNonWhitespace(str, next.index + 1);
-        return afterComma.char === '"' || afterComma.char === '}';
+        return afterComma.char === null || afterComma.char === '"' || afterComma.char === '}';
       }
     } else if (currentContext === "ARRAY") {
       if (next.char === ']') return true;
       if (next.char === ',') {
         const afterComma = peekNextNonWhitespace(str, next.index + 1);
-        return afterComma.char === '"' || afterComma.char === '{' || afterComma.char === ']';
+        return afterComma.char === null || afterComma.char === '"' || afterComma.char === '{' || afterComma.char === ']';
       }
     }
     return false;
@@ -199,6 +201,7 @@ function repairAndExtractJson(raw: string): string {
         const currentContext = contextStack[contextStack.length - 1];
         if (currentContext === "OBJECT" && !expectValue) {
           state = "STRING_KEY";
+          lastKeyStartIndex = result.length;
           result += char;
         } else if (currentContext === "OBJECT" && expectValue) {
           state = "STRING_VALUE";
@@ -222,11 +225,15 @@ function repairAndExtractJson(raw: string): string {
       const currentContext = state === "STRING_VALUE" ? "OBJECT" : "ARRAY";
 
       if (char === '\\') {
-        result += char;
-        if (i + 1 < raw.length) {
-          result += raw[i + 1];
+        if (i + 1 >= raw.length) {
+          // 截斷在反斜線處
+          result += '\\\\';
           i++;
+          continue;
         }
+        result += char;
+        result += raw[i + 1];
+        i++;
       } else if (char === '"') {
         if (isValidClosingQuote(raw, i, currentContext)) {
           state = "NORMAL";
@@ -247,6 +254,40 @@ function repairAndExtractJson(raw: string): string {
     }
 
     i++;
+  }
+
+  // ─── 處理截斷恢復 (Truncation Recovery) ───
+  if (objectDepth > 0 || arrayDepth > 0) {
+    console.warn(
+      `[JSON 修復] 偵測到 JSON 被截斷。原始長度: ${raw.length}, ` +
+      `當前狀態: ${state}, 物件深度: ${objectDepth}, 陣列深度: ${arrayDepth}`
+    );
+
+    if (state === "STRING_KEY") {
+      // 截斷在鍵值名稱中，丟棄未完成的 Key
+      if (lastKeyStartIndex >= 0) {
+        result = result.slice(0, lastKeyStartIndex);
+      }
+      result = result.trim().replace(/,$/, "");
+      state = "NORMAL";
+    } else if (state === "STRING_VALUE" || state === "STRING_ARRAY_VALUE") {
+      // 截斷在字串值中，補上閉合引號
+      result += '"';
+      state = "NORMAL";
+    }
+
+    // 移除尾隨逗號
+    result = result.trim().replace(/,$/, "");
+
+    // 依據 contextStack 逆向閉合所有未完成的括號
+    while (contextStack.length > 0) {
+      const ctx = contextStack.pop();
+      if (ctx === "OBJECT") {
+        result += '}';
+      } else if (ctx === "ARRAY") {
+        result += ']';
+      }
+    }
   }
 
   return result;
