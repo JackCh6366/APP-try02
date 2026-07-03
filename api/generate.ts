@@ -1228,7 +1228,7 @@ export default async function handler(req: any, res: any) {
         "請稍候片刻後重試，或切換至其他 AI 模型。";
     } else if (/timeout|abort|ETIMEDOUT|ECONNRESET|socket hang/i.test(raw)) {
       userMessage =
-        "請求逾時（Timeout）：影片內容可能過長或伺服器暫時無回應。" +
+        "請求逾時（Timeout）：影片內容可能過長或伺服器暫時無回應" +
         "建議改用較短的影片，或切換至另一個 AI 模型後重試。";
     } else if (/private|age.?restrict|region.?lock/i.test(raw)) {
       userMessage =
