@@ -270,6 +270,40 @@ function extractTranscriptAndStrip(
   return { transcript: "", stripped: raw };
 }
 
+/**
+ * 從 YouTube 影片中抓取字幕，支援多語言 Fallback。
+ * 依序嘗試 zh-TW → zh → en → 不指定語言。
+ */
+async function fetchYoutubeTranscript(url: string): Promise<string> {
+  try {
+    const { YoutubeTranscript } = await import("youtube-transcript");
+    const cleanUrl = cleanYoutubeUrl(url.trim());
+    const LANG_FALLBACKS = ["zh-TW", "zh", "en"];
+    let segments: any[] | null = null;
+
+    for (const lang of LANG_FALLBACKS) {
+      try {
+        segments = await YoutubeTranscript.fetchTranscript(cleanUrl, { lang });
+        if (segments?.length) break;
+      } catch {
+        // 該語言不存在，繼續嘗試下一個
+      }
+    }
+
+    if (!segments?.length) {
+      try {
+        segments = await YoutubeTranscript.fetchTranscript(cleanUrl);
+      } catch {
+        // 忽略錯誤
+      }
+    }
+
+    return (segments ?? []).map((s: any) => s.text).join(" ");
+  } catch {
+    return "";
+  }
+}
+
 /** Fetch page text + any caption/transcript hints from a non-YouTube URL */
 async function getNonYoutubeLinkContext(
   url: string
@@ -432,7 +466,11 @@ async function buildGeminiContents(body: GenerateBody) {
 // Gemini 版：要求完整逐字稿（Gemini 能直接讀影音，輸出不受 token 限制影音）
 // NVIDIA 版：要求簡潔整理版逐字稿（純文字模型內容已給定，輸出必須控制在 token 限制內）
 // ─────────────────────────────────────────────────────────────────────────────
-function buildSystemPrompt(options: SummaryOptions, provider: "gemini" | "nvidia" = "gemini"): string {
+function buildSystemPrompt(
+  options: SummaryOptions,
+  provider: "gemini" | "nvidia" = "gemini",
+  hasFetchedTranscript = false
+): string {
   const langMap: Record<string, string> = {
     zh: "Traditional Chinese (繁體中文)",
     en: "English",
@@ -451,11 +489,10 @@ function buildSystemPrompt(options: SummaryOptions, provider: "gemini" | "nvidia
       ? "Pay special attention to action items, decisions, tasks, and commitments mentioned."
       : "Focus on key takeaways, insights, and the most important concepts.";
 
-  // NVIDIA 的 transcript 欄位：
+  // NVIDIA 或已在後端抓取字幕的情況：
   // 強制輸出空字串 ""，由後端自行填入已清洗的輸入字幕。
-  // 原因：模型若輸出完整逐字稿，法文/英文內容常含未跳脫的雙引號（如對話引用），
-  //       導致 JSON 結構損毀無法解析。字幕已在輸入中，無需再複製到輸出。
-  const transcriptInstruction = provider === "nvidia"
+  // 原因：模型若輸出完整逐字稿，會耗費極多 Token 與生成時間（常導致 60s 超時），且易因特殊字元導致 JSON 結構損毀。
+  const transcriptInstruction = (provider === "nvidia" || hasFetchedTranscript)
     ? `"transcript": "" (IMPORTANT: always output empty string for this field — transcript is injected separately)`
     : `"transcript": "string — full verbatim transcription of spoken content (Traditional Chinese preferred if originally in Chinese; otherwise keep original language)"`;
 
@@ -685,6 +722,15 @@ export default async function handler(req: any, res: any) {
   const { provider = "gemini", options } = body;
 
   try {
+    // ── 預先獲取 YouTube 字幕（NVIDIA 與 Gemini 共用） ──
+    // 這能讓我們在 Gemini 模式中同樣實施「後端注入逐字稿」策略，
+    // 大幅縮短 LLM 的 JSON 生成時間，避免 Vercel 60 秒的超時限制。
+    let youtubeTranscript = "";
+    if (body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink)) {
+      const cleanUrl = cleanYoutubeUrl(body.videoLink.trim());
+      youtubeTranscript = await fetchYoutubeTranscript(cleanUrl);
+    }
+
     const systemPrompt = buildSystemPrompt(options);
 
     // ── NVIDIA path (text-only) ──
@@ -703,36 +749,11 @@ export default async function handler(req: any, res: any) {
       } else if (body.mediaType === "link") {
         if (!body.videoLink?.trim()) throw new Error("Please provide a valid media URL.");
         if (isYoutubeUrl(body.videoLink)) {
-          // ── YouTube 連結：優先抓官方字幕，失敗時降級使用頁面 metadata ──
           const cleanUrl = cleanYoutubeUrl(body.videoLink.trim());
           let transcriptText = "";
 
-          try {
-            const { YoutubeTranscript } = await import("youtube-transcript");
-
-            // 依序嘗試各語言字幕，確保能取得任何可用字幕（如影片只有 fr 字幕）
-            // zh-TW → zh → en → 不指定語言（讓 API 回傳第一個可用語言）
-            const LANG_FALLBACKS = ["zh-TW", "zh", "en"];
-            let segments: any[] | null = null;
-
-            for (const lang of LANG_FALLBACKS) {
-              try {
-                segments = await YoutubeTranscript.fetchTranscript(cleanUrl, { lang });
-                if (segments?.length) break;
-              } catch {
-                // 該語言不存在，繼續嘗試下一個
-              }
-            }
-
-            // 全部語言都失敗 → 不指定語言，讓 API 回傳第一個可用語言（如 fr、de 等）
-            if (!segments?.length) {
-              segments = await YoutubeTranscript.fetchTranscript(cleanUrl);
-            }
-
-            const rawTranscript = (segments ?? []).map((s: any) => s.text).join(" ");
-            if (rawTranscript.trim()) transcriptText = cleanTranscriptForNvidia(rawTranscript);
-          } catch {
-            // 字幕完全不可用（無字幕影片或 API 封鎖），將降級使用頁面 metadata
+          if (youtubeTranscript.trim()) {
+            transcriptText = cleanTranscriptForNvidia(youtubeTranscript);
           }
 
           if (transcriptText) {
@@ -808,8 +829,22 @@ export default async function handler(req: any, res: any) {
       return res.status(500).json({ success: false, error: "GEMINI_API_KEY not configured." });
     }
 
+    // 判斷是否能預先注入字幕，避免 Gemini 輸出長字串導致超時
+    let geminiTranscriptToInject = "";
+    if (body.mediaType === "transcript_paste") {
+      geminiTranscriptToInject = body.textTranscript || "";
+    } else if (body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink)) {
+      geminiTranscriptToInject = youtubeTranscript;
+    }
+
+    const geminiSystemPrompt = buildSystemPrompt(options, "gemini", !!geminiTranscriptToInject);
     const contents = await buildGeminiContents(body);
-    const result = await callGemini(contents, systemPrompt, apiKey, options);
+    const result = await callGemini(contents, geminiSystemPrompt, apiKey, options);
+
+    // 注入預先取得或貼上的字幕
+    if (geminiTranscriptToInject && result && typeof result === "object") {
+      result.transcript = geminiTranscriptToInject;
+    }
 
     return res.status(200).json({
       success: true,
