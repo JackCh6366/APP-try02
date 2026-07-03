@@ -887,19 +887,52 @@ async function callGemini(
     },
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(280_000),
-  });
+  let res: any;
+  let json: any;
+  const maxRetries = 3;
+  let delay = 2000; // 2 seconds initial delay
 
-  const json = await res.json() as any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(280_000),
+      });
 
-  if (!res.ok) {
-    throw new Error(
-      `Gemini API error ${res.status}: ${json?.error?.message || JSON.stringify(json)}`
-    );
+      json = await res.json() as any;
+
+      if (!res.ok) {
+        // If high demand (503) or rate limit (429), retry
+        if ((res.status === 503 || res.status === 429) && attempt < maxRetries) {
+          console.warn(
+            `[callGemini] Got HTTP ${res.status} (${res.status === 503 ? "High demand" : "Rate limit"}). ` +
+            `Retrying in ${delay}ms... (Attempt ${attempt + 1}/${maxRetries})`
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          delay *= 2.5; // exponential backoff
+          continue;
+        }
+        throw new Error(
+          `Gemini API error ${res.status}: ${json?.error?.message || JSON.stringify(json)}`
+        );
+      }
+      break; // Success
+    } catch (err: any) {
+      // If we got a network error or fetch aborted/timeout, and we have retries left, retry too!
+      // (High demand/server overload might manifest as socket hangs/timeouts)
+      if (attempt < maxRetries) {
+        console.warn(
+          `[callGemini] Request failed: ${err.message || err}. ` +
+          `Retrying in ${delay}ms... (Attempt ${attempt + 1}/${maxRetries})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= 2.5;
+        continue;
+      }
+      throw err;
+    }
   }
 
   const rawText: string =
@@ -945,34 +978,65 @@ async function callNvidia(
   const MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5";
   const url = "https://integrate.api.nvidia.com/v1/chat/completions";
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: textContent },
-      ],
-      temperature: 0.2,
-      top_p: 0.95,
-      max_tokens: 65000,   // 恢復舊版設定；32768 對長字幕影片不夠用，會導致輸出截斷
-      stream: false,
-      frequency_penalty: 0,
-      presence_penalty: 0,
-    }),
-    signal: AbortSignal.timeout(120_000),
-  });
+  let res: any;
+  let json: any;
+  const maxRetries = 3;
+  let delay = 2000;
 
-  const json = await res.json() as any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: textContent },
+          ],
+          temperature: 0.2,
+          top_p: 0.95,
+          max_tokens: 65000,   // 恢復舊版設定；32768 對長字幕影片不夠用，會導致輸出截斷
+          stream: false,
+          frequency_penalty: 0,
+          presence_penalty: 0,
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
 
-  if (!res.ok) {
-    throw new Error(
-      `NVIDIA API error ${res.status}: ${json?.detail || json?.message || JSON.stringify(json)}`
-    );
+      json = await res.json() as any;
+
+      if (!res.ok) {
+        // 503 (高負載) 或 429 (速率限制) 皆可重試
+        if ((res.status === 503 || res.status === 429) && attempt < maxRetries) {
+          console.warn(
+            `[callNvidia] Got HTTP ${res.status}. ` +
+            `Retrying in ${delay}ms... (Attempt ${attempt + 1}/${maxRetries})`
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          delay *= 2.5;
+          continue;
+        }
+        throw new Error(
+          `NVIDIA API error ${res.status}: ${json?.detail || json?.message || JSON.stringify(json)}`
+        );
+      }
+      break; // Success
+    } catch (err: any) {
+      if (attempt < maxRetries) {
+        console.warn(
+          `[callNvidia] Request failed: ${err.message || err}. ` +
+          `Retrying in ${delay}ms... (Attempt ${attempt + 1}/${maxRetries})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= 2.5;
+        continue;
+      }
+      throw err;
+    }
   }
 
   const rawText: string = json?.choices?.[0]?.message?.content ?? "";
@@ -1129,9 +1193,33 @@ export default async function handler(req: any, res: any) {
 
   } catch (err: any) {
     console.error("[generate] Error:", err);
+
+    const raw: string = err?.message || "";
+
+    // ── 友善中文錯誤訊息：依照錯誤類型給出具體建議 ──
+    let userMessage: string;
+    if (/503|high demand|overloaded|Service Unavailable/i.test(raw)) {
+      userMessage =
+        "目前 AI 服務需求量過高（503），系統已自動重試仍未成功。" +
+        "請稍候 1～2 分鐘後再試，或切換至另一個 AI 模型（如 Google Gemini ↔ NVIDIA）。";
+    } else if (/429|rate.?limit|quota/i.test(raw)) {
+      userMessage =
+        "API 請求頻率已達上限（429 Rate Limit）。" +
+        "請稍候片刻後重試，或切換至其他 AI 模型。";
+    } else if (/timeout|abort|ETIMEDOUT|ECONNRESET|socket hang/i.test(raw)) {
+      userMessage =
+        "請求逾時（Timeout）：影片內容可能過長或伺服器暫時無回應。" +
+        "建議改用較短的影片，或切換至另一個 AI 模型後重試。";
+    } else if (/private|age.?restrict|region.?lock/i.test(raw)) {
+      userMessage =
+        "此影片為私人影片、年齡限制影片或地區封鎖，無法取得內容，請嘗試其他影片。";
+    } else {
+      userMessage = raw || "發生未知錯誤，請稍後重試。";
+    }
+
     return res.status(500).json({
       success: false,
-      error: err.message || "Internal server error.",
+      error: userMessage,
     });
   }
 }
