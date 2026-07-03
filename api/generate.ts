@@ -478,9 +478,24 @@ async function fetchYoutubeTranscript(url: string): Promise<string> {
     const LANG_FALLBACKS = ["zh-TW", "zh", "en"];
     let segments: any[] | null = null;
 
+    // 自訂 fetch 用於注入 Cookie 繞過 YouTube 同意頁面 / 機器人驗證，
+    // 並帶入合適的 User-Agent 確保 /api/timedtext 不會回傳空回應。
+    const customFetch = (fetchUrl: string, init?: any) => {
+      return fetch(fetchUrl, {
+        ...init,
+        headers: {
+          ...init?.headers,
+          "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+417; GPS=1; YSC=1; VISITOR_INFO1_LIVE=1",
+        },
+      });
+    };
+
     for (const lang of LANG_FALLBACKS) {
       try {
-        segments = await YoutubeTranscript.fetchTranscript(cleanUrl, { lang });
+        segments = await YoutubeTranscript.fetchTranscript(cleanUrl, {
+          lang,
+          fetch: customFetch,
+        });
         if (segments?.length) break;
       } catch {
         // 該語言不存在，繼續嘗試下一個
@@ -489,7 +504,9 @@ async function fetchYoutubeTranscript(url: string): Promise<string> {
 
     if (!segments?.length) {
       try {
-        segments = await YoutubeTranscript.fetchTranscript(cleanUrl);
+        segments = await YoutubeTranscript.fetchTranscript(cleanUrl, {
+          fetch: customFetch,
+        });
       } catch {
         // 忽略錯誤
       }
@@ -552,6 +569,10 @@ async function getNonYoutubeLinkContext(
 async function getYoutubePageMetadata(
   url: string
 ): Promise<{ title: string; description: string; channel: string }> {
+  let title = "";
+  let description = "";
+  let channel = "";
+
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(8000),
@@ -559,33 +580,60 @@ async function getYoutubePageMetadata(
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
         "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+417",
       },
     });
-    if (!res.ok) return { title: "", description: "", channel: "" };
+    if (res.ok) {
+      const html = await res.text();
 
-    const html = await res.text();
+      const titleMatch =
+        html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i) ||
+        html.match(/<title>([^<]+)<\/title>/i);
+      title = titleMatch
+        ? titleMatch[1].replace(/ - YouTube$/, "").trim()
+        : "";
 
-    const titleMatch =
-      html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i) ||
-      html.match(/<title>([^<]+)<\/title>/i);
-    const title = titleMatch
-      ? titleMatch[1].replace(/ - YouTube$/, "").trim()
-      : "";
+      const descMatch =
+        html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i) ||
+        html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/i);
+      description = descMatch ? descMatch[1].trim() : "";
 
-    const descMatch =
-      html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i) ||
-      html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/i);
-    const description = descMatch ? descMatch[1].trim() : "";
-
-    const channelMatch =
-      html.match(/"ownerChannelName":"([^"]+)"/) ||
-      html.match(/"channelName":"([^"]+)"/);
-    const channel = channelMatch ? channelMatch[1].trim() : "";
-
-    return { title, description, channel };
+      const channelMatch =
+        html.match(/"ownerChannelName":"([^"]+)"/) ||
+        html.match(/"channelName":"([^"]+)"/);
+      channel = channelMatch ? channelMatch[1].trim() : "";
+    }
   } catch {
-    return { title: "", description: "", channel: "" };
+    // 忽略錯誤
   }
+
+  // ── 如果被 YouTube 阻擋/重新導向至同意頁面（標題為 YouTube 或包含使用體驗） ──
+  // 或者是頻道名稱為空時，使用官方的 oEmbed API 作為強健的 Fallback
+  const isBlockedTitle = !title || title === "YouTube" || title.includes("平台使用體驗") || title.includes("Before you continue");
+  if (isBlockedTitle || !channel) {
+    try {
+      const videoId = extractYoutubeVideoId(url);
+      if (videoId) {
+        const oembedRes = await fetch(
+          `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+          { signal: AbortSignal.timeout(5000) }
+        );
+        if (oembedRes.ok) {
+          const data = await oembedRes.json() as any;
+          if (data.title && isBlockedTitle) {
+            title = data.title;
+          }
+          if (data.author_name && !channel) {
+            channel = data.author_name;
+          }
+        }
+      }
+    } catch {
+      // 忽略錯誤
+    }
+  }
+
+  return { title, description, channel };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

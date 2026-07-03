@@ -34,7 +34,7 @@ Target translation languages: English
 If translation for a language is not requested, omit that key from translations.
 Always include the Traditional Chinese summary in "summaryText".`;
 
-const videoLink = 'https://www.youtube.com/watch?v=OViPNQR49Uw';
+const videoLink = 'https://www.youtube.com/watch?v=0IFyEe4JOcM';
 
 console.log("Fetching YouTube transcript...");
 YoutubeTranscript.fetchTranscript(videoLink)
@@ -77,13 +77,6 @@ YoutubeTranscript.fetchTranscript(videoLink)
         console.log("JSON is VALID!");
       } catch (e) {
         console.log("JSON parsing FAILED:", e.message);
-        try {
-          const match = e.message.match(/position (\d+)/);
-          if (match) {
-            const pos = parseInt(match[1], 10);
-            console.log("Context around error position:", JSON.stringify(rawText.slice(Math.max(0, pos - 50), pos + 50)));
-          }
-        } catch (_) {}
       }
     } else {
       console.log("Error or empty response:", data);
