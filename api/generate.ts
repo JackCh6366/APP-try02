@@ -942,53 +942,29 @@ export default async function handler(req: any, res: any) {
 
       // Collapse content to plain text for NVIDIA
       let textContent = "";
+      let finalTranscriptForNvidia = "";
+
       if (body.mediaType === "transcript_paste") {
         textContent = body.textTranscript || "";
+        finalTranscriptForNvidia = body.textTranscript || "";
       } else if (body.mediaType === "link") {
         if (!body.videoLink?.trim()) throw new Error("Please provide a valid media URL.");
         if (isYoutubeUrl(body.videoLink)) {
           const cleanUrl = cleanYoutubeUrl(body.videoLink.trim());
-          let transcriptText = "";
-
           if (youtubeTranscript.trim()) {
-            transcriptText = cleanTranscriptForNvidia(youtubeTranscript);
-          }
-
-          if (transcriptText) {
-            // ── 有字幕：品質最佳路徑，直接送 NVIDIA 分析 ──
-            // transcriptText 已清洗（無 SRT 時間戳記、限 6000 字元）
-            // 後端稍後會把完整字幕注入到 result.transcript，不依賴模型複製
+            const transcriptText = cleanTranscriptForNvidia(youtubeTranscript);
             textContent = `YouTube URL: ${cleanUrl}\n\n字幕內容（逐字稿）：\n${transcriptText}`;
+            finalTranscriptForNvidia = youtubeTranscript;
           } else {
-            // ── 無字幕：NVIDIA 純文字模型無法讀取影音，自動切換 Gemini 分析 ──
-            // 讓純文字模型僅憑標題/描述猜測內容，會產生與影片實際內容不符的錯誤資訊。
-            // 正確做法：自動 fallback 到 Gemini（能直接讀取 YouTube 音訊），確保結果準確。
-            const geminiKey = process.env.GEMINI_API_KEY;
-            if (!geminiKey) {
-              return res.status(422).json({
-                success: false,
-                error:
-                  "此 YouTube 影片沒有可用字幕，NVIDIA 無法讀取音訊；自動切換 Gemini 時亦發現 GEMINI_API_KEY 未設定。" +
-                  "請設定 GEMINI_API_KEY 環境變數，或手動貼上字幕後再使用 NVIDIA 分析。",
-              });
-            }
-
-            // 直接以 Gemini 分析影片，回傳時標示實際使用的模型
-            const geminiContents = await buildGeminiContents({
-              ...body,
-              videoLink: cleanUrl,
-            });
-            const fallbackGeminiSystemPrompt = buildSystemPrompt(options, "gemini", false);
-            const geminiResult = await callGemini(geminiContents, fallbackGeminiSystemPrompt, geminiKey, options);
-            return res.status(200).json({
-              success: true,
-              result: geminiResult,
-              usedModel: "gemini-2.5-flash (auto-fallback: no transcript available for NVIDIA)",
-            });
+            // ── 無字幕：直接抓取影片中繼資料 (Metadata)，送 NVIDIA 分析，絕不 fallback 到 Gemini ──
+            const meta = await getYoutubePageMetadata(cleanUrl);
+            textContent = `YouTube URL: ${cleanUrl}\n影片標題: ${meta.title || "(無標題)"}\n頻道: ${meta.channel || "(未知)"}\n描述:\n${meta.description || "(無描述)"}\n\n注意：此影片沒有可用字幕/逐字稿，請完全依據影片中繼資料進行主題與概念分析。`;
+            finalTranscriptForNvidia = "（此影片沒有可用字幕，已改用影片中繼資料進行概念分析）";
           }
         } else {
           const ctx = await getNonYoutubeLinkContext(body.videoLink);
           textContent = `URL: ${body.videoLink}\n\nPage context:\n${ctx.pageText}\n\nTranscript:\n${ctx.transcript || "(none)"}`;
+          finalTranscriptForNvidia = ctx.transcript || "";
         }
       } else {
         return res.status(400).json({
@@ -997,22 +973,12 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      // transcript_paste 模式的輸入逐字稿也存到變數供後續注入
-      const nvidiaInputTranscript =
-        body.mediaType === "transcript_paste" ? (body.textTranscript || "") : "";
-
       const result = await callNvidia(textContent, nvidiaSystemPrompt, apiKey);
 
       // NVIDIA 被指示輸出空的 transcript 欄位。
-      // 在此注入已清洗的輸入字幕，讓前端能正常顯示逐字稿。
+      // 在此注入已清洗的輸入字幕或說明，讓前端能正常顯示。
       if (result && typeof result === "object") {
-        result.transcript = body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink)
-          ? cleanTranscriptForNvidia(
-              // 重新清洗以確保字元一致（transcriptText 可能因 scope 已釋放，從 textContent 取回）
-              textContent.replace(/^YouTube URL:.*?\n\n字幕內容（逐字稿）：\n/s, "").trim(),
-              20_000
-            )
-          : nvidiaInputTranscript;
+        result.transcript = finalTranscriptForNvidia;
       }
 
       return res.status(200).json({
