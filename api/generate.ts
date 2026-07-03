@@ -727,53 +727,100 @@ function buildSystemPrompt(
   };
   const langList = options.targetLanguages.map((l) => langMap[l] || l).join(", ");
 
+  // ── 深度需求：量化字數要求（還原 6/30 穩定版設定，避免模型偷懶輸出過短內容）──
   const depthInstruction =
     options.depth === "quick"
-      ? "Keep sections concise — 2-4 bullet points max per section."
-      : "Be thorough and comprehensive — include all important details, context, and nuance.";
+      ? "Produce a concise but complete summary. All text fields combined should be at least 3000 Traditional Chinese characters."
+      : "Produce an EXTREMELY DETAILED and COMPREHENSIVE analysis. ALL text fields combined MUST reach at least 10000 Traditional Chinese characters. Every segment summary should be at least 300 characters. The summaryText should be at least 800 characters. Each translation should be at least 2000 characters. Do NOT truncate or summarize briefly — expand every point with full context, background, examples and reasoning.";
+
+  // ── 項目數量要求（還原 6/30 穩定版設定）──
+  const quantityInstruction =
+    options.depth === "quick"
+      ? `- segments array should contain at least 4 items, each with a clear summary.
+- keyConcepts should contain at least 6 items.
+- actionItems should contain at least 4 items if any are present in the content.`
+      : `- segments array MUST contain at least 8 items for detailed depth, each with a thorough summary.
+- keyConcepts MUST contain at least 15 items, each being a complete phrase or short explanation (not just a single word).
+- actionItems MUST contain at least 10 items if any are present in the content.`;
 
   const goalInstruction =
     options.primaryGoal === "actions"
-      ? "Pay special attention to action items, decisions, tasks, and commitments mentioned."
-      : "Focus on key takeaways, insights, and the most important concepts.";
+      ? "Focus on extracting ALL actionable items, decisions, next steps, responsibilities and deadlines mentioned. Each actionItem should be a complete sentence with full context."
+      : "Focus on extracting ALL key knowledge points, insights, concepts and takeaways. Each keyConcept should include a brief explanation of why it matters.";
 
   // NVIDIA 或已在後端抓取字幕的情況：
   // 強制輸出空字串 ""，由後端自行填入已清洗的輸入字幕。
   // 原因：模型若輸出完整逐字稿，會耗費極多 Token 與生成時間（常導致 60s 超時），且易因特殊字元導致 JSON 結構損毀。
+  // （此為後來版本新增的防呆架構，予以保留，不還原成舊版「模型自行輸出逐字稿」的做法。）
   const transcriptInstruction = (provider === "nvidia" || hasFetchedTranscript)
     ? `"transcript": "" (IMPORTANT: always output empty string for this field — transcript is injected separately)`
-    : `"transcript": "string — full verbatim transcription of spoken content (Traditional Chinese preferred if originally in Chinese; otherwise keep original language)"`;
+    : `"transcript": "string — full verbatim transcription of spoken content, MUST be written in Traditional Chinese (繁體中文) if source is Chinese, otherwise keep original language; must be detailed and complete"`;
 
-  return `You are an expert multilingual media analyst and transcription specialist.
-Your task is to analyze the provided audio/video/transcript content and return a structured JSON response.
+  // NVIDIA 專屬的嚴格 JSON 格式規則（還原 6/30 穩定版設定，降低截斷/格式錯誤機率）
+  const nvidiaJsonRules = provider === "nvidia"
+    ? `
+
+!!NVIDIA STRICT JSON RULES — MUST FOLLOW!!
+- Output ONLY a single raw JSON object. No markdown fences. No \`\`\`json. No \`\`\`.
+- ABSOLUTELY NO comments inside JSON. No // comments. No /* */ comments. JSON does not support comments.
+- Do NOT add trailing commas after the last item in any array or object.
+- Every string value must be properly escaped. Use \\n for newlines inside strings, never actual line breaks.
+- Complete the ENTIRE JSON before stopping. Never truncate mid-string or mid-object.
+- If content is very long, shorten individual field values slightly to fit, but ALWAYS close all brackets and braces properly.`
+    : "";
+
+  return `You are an elite multilingual media transcriptionist, content analyst, and translator with exceptional attention to detail.
+
+!!CRITICAL LANGUAGE REQUIREMENT — MUST FOLLOW WITHOUT EXCEPTION!!
+- ALL output fields including title, transcript (if applicable), summaryText, every segment title and summary, every keyConcept, and every actionItem MUST be written EXCLUSIVELY in Traditional Chinese (繁體中文).
+- Traditional Chinese uses characters such as: 這、來、國、時、說、們、體、語、為、與、個、會、對、後、發、現、開、過、從、裡
+- STRICTLY FORBIDDEN: Do NOT use Simplified Chinese (简体字) characters anywhere. Simplified Chinese uses: 这、来、国、时、说、们、体、语、为、与、个、会、对、后、发、现、开、过、从、里
+- Even if the source media is in Mandarin (Simplified Chinese), Cantonese, English, Japanese, or any other language — you MUST still write ALL non-translation fields in Traditional Chinese (繁體中文).
+- The translations.zh field (if requested) must also be written in Traditional Chinese (繁體中文), NOT Simplified Chinese.
+- Double-check every character you output. If you are unsure whether a character is Traditional or Simplified, choose the Traditional form.
+
+!!CRITICAL OUTPUT LENGTH REQUIREMENT!!
+${depthInstruction}
+${quantityInstruction}
+- translations for each selected language MUST be complete, polished Markdown with headers, bullet points, and full explanations — NOT a brief summary.
+- NEVER cut content short. If you are running long, continue until all fields are complete and thorough.
+
+!!CONTENT AVAILABILITY CHECK!!
+- If the media content is inaccessible, private, region-locked, or has insufficient information to analyze:
+  Set summaryText to exactly: "【內容無法順利取得】此影音連結目前無法正常存取或內容資訊不足，請確認連結是否為公開影片，或嘗試更換其他連結後重新分析。"
+  Set all segment summaries to the same error message.
+  Set translations.zh (if requested) to the same error message in Markdown format.
+  Do NOT fabricate or guess content. Do NOT produce placeholder analysis.
 
 Analysis depth: ${options.depth === "quick" ? "Quick summary" : "Detailed analysis"}
-${depthInstruction}
 ${goalInstruction}
 
 You MUST respond with ONLY valid JSON (no markdown fences, no prose), matching this exact schema:
 {
-  "title": "string — concise title for this content",
-  "originalLanguage": "string — detected primary spoken/written language",
+  "title": "string — concise title for this content, in Traditional Chinese (繁體中文)",
+  "originalLanguage": "string — 繁體中文 description of the detected source language (e.g. 英文、日文、韓文、普通話、粵語)",
   ${transcriptInstruction},
-  "summaryText": "string — comprehensive summary in Traditional Chinese (繁體中文)",
+  "summaryText": "string — comprehensive executive summary in Traditional Chinese (繁體中文), minimum ${options.depth === "quick" ? "500" : "800"} characters",
   "segments": [
     {
-      "title": "string — section heading",
-      "timeRange": "string or null — e.g. '00:00 - 05:30'",
-      "summary": "string — paragraph summary of this segment"
+      "title": "string — section heading in Traditional Chinese (繁體中文)",
+      "timeRange": "string or null — e.g. '00:00 - 05:30', or descriptive labels like '開場介紹'、'核心論點'、'結論' if no timestamps are available",
+      "summary": "string — paragraph summary of this segment in Traditional Chinese (繁體中文)"
     }
   ],
-  "keyConcepts": ["string", "..."],
-  "actionItems": ["string", "..."],
+  "keyConcepts": ["string — Traditional Chinese (繁體中文), concept name plus brief explanation, not just a single word", "..."],
+  "actionItems": ["string — Traditional Chinese (繁體中文), complete actionable sentence", "..."],
   "translations": {
-    ${options.targetLanguages.filter((l) => l !== "zh").map((l) => `"${l}": "string — full formatted Markdown summary in ${langMap[l] || l}"`).join(",\n    ")}
+    ${options.targetLanguages.filter((l) => l !== "zh").map((l) => `"${l}": "string — full formatted Markdown summary in ${langMap[l] || l}, minimum 2000 characters, with ## headers and bullet points"`).join(",\n    ")}
   }
 }
 
 Target translation languages: ${langList}
 If translation for a language is not requested, omit that key from translations.
-Always include the Traditional Chinese summary in "summaryText".`;
+Always include the Traditional Chinese summary in "summaryText".
+Do not wrap the JSON in markdown fences.
+Start your response IMMEDIATELY with { and end with }. No preamble, no explanation, no markdown fences.
+Every field in the JSON shape above MUST be present. Never omit required fields.${nvidiaJsonRules}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
