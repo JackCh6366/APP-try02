@@ -166,12 +166,15 @@ export default function App() {
         usedModelName = `本地模型・${payload.localConfig.modelName}`;
       } else {
         // ── Gemini / NVIDIA：照舊呼叫 Vercel 後端 ──
+        // 前端加上 290 秒超時（略低於 Vercel Pro maxDuration=300s），
+        // 確保超時行為可預測，並能給出友善的中文錯誤提示。
         const response = await fetch("/api/generate", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(290_000),
         });
 
         const responseText = await response.text();
@@ -238,7 +241,16 @@ export default function App() {
 
     } catch (err: any) {
       console.error("進行影音重點分析失敗:", err);
-      setError(err.message || "處理影音時與伺服器斷開，或是音訊過長導致超時。請再試一次。");
+      // 辨識超時錯誤（AbortError）給出明確的中文提示
+      const isTimeout =
+        err?.name === "AbortError" ||
+        err?.message?.toLowerCase().includes("timeout") ||
+        err?.message?.toLowerCase().includes("aborted");
+      setError(
+        isTimeout
+          ? "⏱️ 請求超時：AI 分析時間超過限制（約 290 秒）。\n可能原因：① 影片過長或解析度過高 ② Vercel 免費方案有 60 秒硬上限（需升級 Pro）③ 網路不穩。\n建議：改用較短片段、切換 NVIDIA + 字幕貼上模式，或升級 Vercel Pro 方案。"
+          : err.message || "處理影音時與伺服器斷開，或是音訊過長導致超時。請再試一次。"
+      );
     } finally {
       setIsLoading(false);
     }
