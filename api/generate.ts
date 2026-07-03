@@ -106,15 +106,171 @@ function sanitizeJsonControlChars(text: string): string {
 }
 
 /**
+ * 徹底修復並擷取 JSON 區塊。
+ * 能處理以下問題：
+ *   1. 前後夾帶 Markdown 標記 (如 ```json ... ```) 或其他無關文字。
+ *   2. 字串欄位內夾帶未跳脫的原始雙引號 (如 "leapfrog and "snake crawling," which...")。
+ *   3. 字串欄位內夾帶原始換行符號 (如 \n, \r, \t)。
+ * 透過括號深度計數（brace count）與語意環境（Normal/Key/Value/Array）掃描，安全找出第一個完整 JSON 區塊。
+ */
+function repairAndExtractJson(raw: string): string {
+  const start = raw.indexOf('{');
+  if (start === -1) return raw;
+
+  let result = "";
+  let state: "NORMAL" | "STRING_KEY" | "STRING_VALUE" | "STRING_ARRAY_VALUE" = "NORMAL";
+  let arrayDepth = 0;
+  let objectDepth = 0;
+  const contextStack: ("OBJECT" | "ARRAY")[] = [];
+
+  function peekNextNonWhitespace(str: string, startIndex: number) {
+    for (let i = startIndex; i < str.length; i++) {
+      if (!/\s/.test(str[i])) {
+        return { char: str[i], index: i };
+      }
+    }
+    return { char: null as string | null, index: -1 };
+  }
+
+  function isValidClosingQuote(str: string, index: number, currentContext: "OBJECT" | "ARRAY") {
+    const next = peekNextNonWhitespace(str, index + 1);
+    if (!next.char) return false;
+
+    if (currentContext === "OBJECT") {
+      if (next.char === '}') return true;
+      if (next.char === ',') {
+        const afterComma = peekNextNonWhitespace(str, next.index + 1);
+        return afterComma.char === '"' || afterComma.char === '}';
+      }
+    } else if (currentContext === "ARRAY") {
+      if (next.char === ']') return true;
+      if (next.char === ',') {
+        const afterComma = peekNextNonWhitespace(str, next.index + 1);
+        return afterComma.char === '"' || afterComma.char === '{' || afterComma.char === ']';
+      }
+    }
+    return false;
+  }
+
+  let i = start;
+  let expectValue = false;
+
+  while (i < raw.length) {
+    const char = raw[i];
+
+    if (state === "NORMAL") {
+      if (char === '{') {
+        objectDepth++;
+        contextStack.push("OBJECT");
+        result += char;
+        expectValue = false;
+      } else if (char === '}') {
+        objectDepth--;
+        contextStack.pop();
+        result += char;
+        expectValue = false;
+        if (objectDepth === 0 && arrayDepth === 0) {
+          return result;
+        }
+      } else if (char === '[') {
+        arrayDepth++;
+        contextStack.push("ARRAY");
+        result += char;
+        expectValue = true;
+      } else if (char === ']') {
+        arrayDepth--;
+        contextStack.pop();
+        result += char;
+        expectValue = false;
+        if (objectDepth === 0 && arrayDepth === 0) {
+          return result;
+        }
+      } else if (char === ':') {
+        result += char;
+        expectValue = true;
+      } else if (char === ',') {
+        result += char;
+        if (contextStack[contextStack.length - 1] === "ARRAY") {
+          expectValue = true;
+        } else {
+          expectValue = false;
+        }
+      } else if (char === '"') {
+        const currentContext = contextStack[contextStack.length - 1];
+        if (currentContext === "OBJECT" && !expectValue) {
+          state = "STRING_KEY";
+          result += char;
+        } else if (currentContext === "OBJECT" && expectValue) {
+          state = "STRING_VALUE";
+          result += char;
+        } else if (currentContext === "ARRAY" && expectValue) {
+          state = "STRING_ARRAY_VALUE";
+          result += char;
+        } else {
+          state = "STRING_VALUE";
+          result += char;
+        }
+      } else {
+        result += char;
+      }
+    } else if (state === "STRING_KEY") {
+      if (char === '"') {
+        state = "NORMAL";
+      }
+      result += char;
+    } else if (state === "STRING_VALUE" || state === "STRING_ARRAY_VALUE") {
+      const currentContext = state === "STRING_VALUE" ? "OBJECT" : "ARRAY";
+
+      if (char === '\\') {
+        result += char;
+        if (i + 1 < raw.length) {
+          result += raw[i + 1];
+          i++;
+        }
+      } else if (char === '"') {
+        if (isValidClosingQuote(raw, i, currentContext)) {
+          state = "NORMAL";
+          expectValue = false;
+          result += char;
+        } else {
+          result += '\\"';
+        }
+      } else if (char === '\n') {
+        result += '\\n';
+      } else if (char === '\r') {
+        result += '\\r';
+      } else if (char === '\t') {
+        result += '\\t';
+      } else {
+        result += char;
+      }
+    }
+
+    i++;
+  }
+
+  return result;
+}
+
+/**
  * 安全解析 AI 回傳的 JSON。
- * 採用五道漸進式修復策略：
- *   1. 直接解析（最佳情況）
- *   2. 清洗控制字元後解析
- *   3. 去除 Markdown 圍欄 + 清洗控制字元
- *   4. 移除尾隨逗號 + 清洗控制字元
- *   5. 擷取第一個 {...} 區塊後再次嘗試以上所有策略
+ * 採用六道漸進式修復策略：
+ *   1. 執行 repairAndExtractJson 進行深層括號與字串修復後解析（最佳、最穩健路徑）
+ *   2. 直接解析原始字串
+ *   3. 清洗控制字元後解析
+ *   4. 去除 Markdown 圍欄 + 清洗控制字元
+ *   5. 移除尾隨逗號 + 清洗控制字元
+ *   6. 擷取第一個 {...} 區塊後再次嘗試以上所有策略
  */
 function safeParseJson(raw: string): any {
+  // 優先嘗試最先進的 repairAndExtractJson 進行修復
+  try {
+    const repaired = repairAndExtractJson(raw);
+    return JSON.parse(repaired);
+  } catch {
+    /* 繼續傳統 fallback 策略 */
+  }
+
   // 移除 Markdown 圍欄（```json ... ```）
   const stripFences = (s: string) =>
     s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
@@ -428,7 +584,10 @@ async function buildGeminiContents(body: GenerateBody) {
           },
         },
         {
-          text: `Please analyze this YouTube video in full detail. Transcribe and summarize the audio/spoken content as thoroughly as possible, based on what is actually said and shown in the video.`,
+          // ⚠️ 重要：transcript 欄位由後端注入（已從 YouTube API 取得字幕），
+          // 此處要求 Gemini 完全略過逐字稿輸出，只專注於摘要分析。
+          // 這是防止 Gemini 輸出大量逐字稿導致 JSON 解析失敗的關鍵機制。
+          text: `Please analyze this YouTube video in full detail. Focus ONLY on producing a thorough summary, segments, key concepts, and translations. Do NOT attempt to transcribe the spoken content — set transcript to empty string as instructed in the system prompt.`,
         },
       ];
     }
@@ -731,8 +890,6 @@ export default async function handler(req: any, res: any) {
       youtubeTranscript = await fetchYoutubeTranscript(cleanUrl);
     }
 
-    const systemPrompt = buildSystemPrompt(options);
-
     // ── NVIDIA path (text-only) ──
     if (provider === "nvidia") {
       // /no_think：關閉 Nemotron 模型的思考模式，避免輸出 <think>...</think> 區塊導致 JSON 解析失敗
@@ -780,7 +937,8 @@ export default async function handler(req: any, res: any) {
               ...body,
               videoLink: cleanUrl,
             });
-            const geminiResult = await callGemini(geminiContents, systemPrompt, geminiKey, options);
+            const fallbackGeminiSystemPrompt = buildSystemPrompt(options, "gemini", false);
+            const geminiResult = await callGemini(geminiContents, fallbackGeminiSystemPrompt, geminiKey, options);
             return res.status(200).json({
               success: true,
               result: geminiResult,
@@ -830,19 +988,28 @@ export default async function handler(req: any, res: any) {
     }
 
     // 判斷是否能預先注入字幕，避免 Gemini 輸出長字串導致超時
+    // ─────────────────────────────────────────────────────────────
+    // Gemini + YouTube 路徑：
+    //   youtubeTranscript 在前面（約 L729）已預先抓好。
+    //   若字幕非空，告知 Gemini 略過逐字稿（hasFetchedTranscript=true），
+    //   後端再把乾淨字幕注入到 result.transcript。
+    //   若字幕為空（無字幕影片），仍讓 Gemini 從影音自行轉錄。
+    // ─────────────────────────────────────────────────────────────
     let geminiTranscriptToInject = "";
     if (body.mediaType === "transcript_paste") {
       geminiTranscriptToInject = body.textTranscript || "";
     } else if (body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink)) {
-      geminiTranscriptToInject = youtubeTranscript;
+      geminiTranscriptToInject = youtubeTranscript; // 可能為空（無字幕影片）
     }
 
-    const geminiSystemPrompt = buildSystemPrompt(options, "gemini", !!geminiTranscriptToInject);
+    // 僅在有字幕時才告知 Gemini 略過逐字稿輸出
+    const hasTranscriptToInject = !!geminiTranscriptToInject.trim();
+    const geminiSystemPrompt = buildSystemPrompt(options, "gemini", hasTranscriptToInject);
     const contents = await buildGeminiContents(body);
     const result = await callGemini(contents, geminiSystemPrompt, apiKey, options);
 
-    // 注入預先取得或貼上的字幕
-    if (geminiTranscriptToInject && result && typeof result === "object") {
+    // 注入預先取得或貼上的字幕（後端已清洗）
+    if (hasTranscriptToInject && result && typeof result === "object") {
       result.transcript = geminiTranscriptToInject;
     }
 
