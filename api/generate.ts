@@ -878,6 +878,12 @@ async function callGemini(
       responseMimeType: "application/json",
       responseSchema,
       temperature: 0.2,
+      // 影片/圖片解析度採用 LOW：每畫面僅消耗 66 tokens（預設為 258 tokens），
+      // 大幅降低長影片的 token 用量（約可延伸 4 倍可處理時長），
+      // 避免遇到 "input token count exceeds the maximum number of tokens allowed 1048576" 錯誤。
+      // 本應用僅需聽懂語音內容做重點摘要，不需辨識畫面中的細小文字或畫面細節，
+      // 故降低解析度對摘要品質影響極小。
+      mediaResolution: "MEDIA_RESOLUTION_LOW",
     },
   };
 
