@@ -223,6 +223,53 @@ function stripTranscriptFromRawJson(raw: string): string {
   return raw.slice(0, openQuotePos + 1) + fallbackTail;
 }
 
+/**
+ * 從原始 JSON 字串中以字元掃描法「提取並清除」transcript 欄位值。
+ * 用於 Gemini 逐字稿含未跳脫雙引號（如對話引用 "是嗎"）導致 JSON.parse 全面失敗時：
+ *   1. 用與 stripTranscriptFromRawJson 相同的掃描法找到真正的關閉引號
+ *   2. 取出原始值並解碼 JSON 跳脫序列（\n → 換行、\" → 雙引號 等）
+ *   3. 回傳清空 transcript 後的 stripped 字串（可被 safeParseJson 正常解析）
+ *   4. 呼叫端把提取的 transcript 重新注入到 parsed 物件
+ *
+ * 注意：此函式只在 safeParseJson 失敗後作為後備路徑執行，不影響正常情況。
+ */
+function extractTranscriptAndStrip(
+  raw: string
+): { transcript: string; stripped: string } {
+  const transcriptKeyPos = raw.search(/"transcript"\s*:\s*"/);
+  if (transcriptKeyPos < 0) return { transcript: "", stripped: raw };
+
+  const colonPos = raw.indexOf(":", transcriptKeyPos);
+  if (colonPos < 0) return { transcript: "", stripped: raw };
+  const openQuotePos = raw.indexOf('"', colonPos + 1);
+  if (openQuotePos < 0) return { transcript: "", stripped: raw };
+
+  // 字元掃描找真正的關閉引號（遇 \ 跳過下一字元，遇 " 即結尾）
+  let i = openQuotePos + 1;
+  let closeQuotePos = -1;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === "\\") { i += 2; continue; }
+    if (ch === '"')  { closeQuotePos = i; break; }
+    i++;
+  }
+
+  if (closeQuotePos > openQuotePos) {
+    // 取出原始 transcript 值並解碼 JSON 跳脫序列
+    const transcriptRaw = raw.slice(openQuotePos + 1, closeQuotePos);
+    const transcript = transcriptRaw
+      .replace(/\\n/g,  "\n")
+      .replace(/\\r/g,  "\r")
+      .replace(/\\t/g,  "\t")
+      .replace(/\\"/g,  '"')
+      .replace(/\\\\/g, "\\");
+    const stripped = raw.slice(0, openQuotePos + 1) + raw.slice(closeQuotePos);
+    return { transcript, stripped };
+  }
+
+  return { transcript: "", stripped: raw };
+}
+
 /** Fetch page text + any caption/transcript hints from a non-YouTube URL */
 async function getNonYoutubeLinkContext(
   url: string
@@ -527,7 +574,26 @@ async function callGemini(
     );
   }
 
-  return safeParseJson(rawText);
+  // ── 主要解析路徑 ──
+  try {
+    return safeParseJson(rawText);
+  } catch (primaryErr) {
+    // ── 後備路徑：transcript 含未跳脫雙引號導致所有策略失敗 ──
+    // （老高等中文頻道逐字稿常含 "他說\"是嗎\"" 形式的對話引用，
+    //   Gemini 有時輸出原始 " 而非跳脫的 \\"，破壞 JSON 結構）
+    // 用字元掃描把 transcript 值單獨提取出來，剩餘 JSON 清空該欄位後重新解析，
+    // 最後把真實逐字稿注入回 parsed 物件。
+    console.warn(
+      "[callGemini] safeParseJson failed, trying extractTranscriptAndStrip fallback.",
+      `Length=${rawText.length}`
+    );
+    const { transcript, stripped } = extractTranscriptAndStrip(rawText);
+    const parsed = safeParseJson(stripped); // 若仍失敗則讓錯誤向上拋出
+    if (transcript && parsed && typeof parsed === "object") {
+      parsed.transcript = transcript;
+    }
+    return parsed;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
