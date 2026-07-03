@@ -77,6 +77,21 @@ export default function SummaryResult({ data, onResultUpdated }: SummaryResultPr
   const defaultLang = availableLangs.includes("zh") ? "zh" : availableLangs[0] || "en";
   const currentLang = data.translations[activeLangTab] ? activeLangTab : defaultLang;
 
+  /**
+   * 清除 AI 有時在 segment.summary 內嵌的多餘時間戳記，例如：
+   *   (00:00 - 02:44）（00:39 - 01:15）...
+   * 這些時間資訊屬於 timeRange 欄位，不應出現在摘要正文中。
+   */
+  const sanitizeSegmentSummary = (text: string): string => {
+    return text
+      // 移除括號包住的時間戳記區間，如 (00:00 - 02:44) 或 （01:15 - 03:13）
+      .replace(/[（(]\s*\d{1,2}:\d{2}(?::\d{2})?\s*[-~～–—]\s*\d{1,2}:\d{2}(?::\d{2})?\s*[)）]/g, "")
+      // 移除連續多個空格
+      .replace(/[ \t]{2,}/g, " ")
+      // 移除行首/行尾多餘空白
+      .trim();
+  };
+
   const handleCopy = (text: string, type: string) => {
     navigator.clipboard.writeText(text);
     setCopiedText(type);
@@ -271,7 +286,7 @@ export default function SummaryResult({ data, onResultUpdated }: SummaryResultPr
                         </div>
                       )}
                     </div>
-                    <p className="text-slate-700 text-xs leading-relaxed font-semibold whitespace-pre-line select-all">{seg.summary}</p>
+                    <p className="text-slate-700 text-xs leading-relaxed font-semibold whitespace-pre-line select-all">{sanitizeSegmentSummary(seg.summary)}</p>
                   </div>
                 </div>
               ))}

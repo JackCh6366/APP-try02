@@ -638,12 +638,24 @@ async function getYoutubePageMetadata(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // buildGeminiContents
-// link 模式分兩條路：
-//   1. YouTube URL → 使用官方 fileData.fileUri 結構化格式，讓 Gemini 真正讀取影片內容
-//      （2026/07 修正：先前誤用純文字嵌入 URL，導致模型完全沒有存取影片、憑空生成內容）
-//   2. 一般 URL    → 維持原本抓 meta + 字幕的方式
+// link 模式分三條路：
+//   1. YouTube URL + 已有官方字幕 → 改傳純文字逐字稿給 Gemini（2026/07 新增）
+//      原因：後端已經用 youtube-transcript 抓到官方字幕時，
+//      若還用 fileData.fileUri 讓 Gemini 重新「看」一次整支影片，
+//      等於同一份內容被傳送兩次：
+//        - 影片時間一長，多模態輸入 token 暴增，容易觸發
+//          「input token count exceeds the maximum number of tokens allowed 1048576」
+//        - 影片資料量大，Gemini 處理時間拉長，更容易撞到 Vercel Function 逾時
+//      官方字幕本身就是最準確的逐字稿來源，改用純文字傳遞：
+//        - Token 成本通常只有多模態影片串流的幾十分之一
+//        - 分析品質不受影響（官方字幕通常比 AI 自動聽寫更準確）
+//        - 完全不影響「沒有字幕的影片」——那種情況仍會 fallback 到原本的
+//          fileData 多模態方式，功能不打折扣
+//   2. YouTube URL + 無字幕 → 沿用官方 fileData.fileUri 結構化格式，讓 Gemini 直接讀取影片內容
+//      （依據 Google 官方文件 ai.google.dev/gemini-api/docs/video-understanding）
+//   3. 一般 URL → 維持原本抓 meta + 字幕的方式
 // ─────────────────────────────────────────────────────────────────────────────
-async function buildGeminiContents(body: GenerateBody) {
+async function buildGeminiContents(body: GenerateBody, youtubeTranscript = "") {
   if (body.mediaType === "transcript_paste") {
     if (!body.textTranscript?.trim()) {
       throw new Error("Please provide transcript text.");
@@ -656,15 +668,26 @@ async function buildGeminiContents(body: GenerateBody) {
       throw new Error("Please provide a valid media URL.");
     }
 
-    // ── YouTube：改用官方正確的 fileData.fileUri 結構化格式 ──
-    // 依據 Google 官方文件（ai.google.dev/gemini-api/docs/video-understanding），
-    // 這是唯一能讓 Gemini「真正讀取」YouTube 影片內容的方式。
-    // ⚠️ 修正說明：先前版本把 YouTube 網址當成純文字塞進 prompt 裡，
-    //    這樣 Gemini 完全沒有機會存取影片內容，只會根據文字脈絡憑空生成內容（幻覺），
-    //    導致回傳結果與影片實際內容完全不符。正確做法必須用 fileData 欄位傳遞。
-    //    最佳實踐：文字提示應放在影片 part 之後（見官方文件 best practices）。
     if (isYoutubeUrl(body.videoLink)) {
       const cleanUrl = cleanYoutubeUrl(body.videoLink.trim());
+
+      // ── 已有官方字幕：改傳文字，不再重複傳送整支影片 ──
+      if (youtubeTranscript.trim()) {
+        return [
+          {
+            text:
+              `以下是這支 YouTube 影片（${cleanUrl}）的官方逐字稿內容，請根據這份逐字稿進行完整、深入的分析。\n\n` +
+              `【官方逐字稿開始】\n${youtubeTranscript.trim()}\n【官方逐字稿結束】\n\n` +
+              `請專注於產出完整摘要、分段重點、關鍵概念與翻譯。` +
+              `transcript 欄位請依系統提示輸出空字串（此欄位已由後端另行注入正確內容），不需要在此重新輸出逐字稿全文。`,
+          },
+        ];
+      }
+
+      // ── 無字幕：沿用官方 fileData.fileUri 多模態格式，讓 Gemini 直接讀影片 ──
+      // ⚠️ 修正說明（沿用既有註記）：先前版本把 YouTube 網址當成純文字塞進 prompt 裡，
+      //    這樣 Gemini 完全沒有機會存取影片內容，只會根據文字脈絡憑空生成內容（幻覺），
+      //    導致回傳結果與影片實際內容完全不符。正確做法必須用 fileData 欄位傳遞。
       return [
         {
           fileData: {
@@ -673,9 +696,6 @@ async function buildGeminiContents(body: GenerateBody) {
           },
         },
         {
-          // ⚠️ 重要：transcript 欄位由後端注入（已從 YouTube API 取得字幕），
-          // 此處要求 Gemini 完全略過逐字稿輸出，只專注於摘要分析。
-          // 這是防止 Gemini 輸出大量逐字稿導致 JSON 解析失敗的關鍵機制。
           text: `Please analyze this YouTube video in full detail. Focus ONLY on producing a thorough summary, segments, key concepts, and translations. Do NOT attempt to transcribe the spoken content — set transcript to empty string as instructed in the system prompt.`,
         },
       ];
@@ -1177,7 +1197,7 @@ export default async function handler(req: any, res: any) {
     // 僅在有字幕時才告知 Gemini 略過逐字稿輸出
     const hasTranscriptToInject = !!geminiTranscriptToInject.trim();
     const geminiSystemPrompt = buildSystemPrompt(options, "gemini", hasTranscriptToInject);
-    const contents = await buildGeminiContents(body);
+    const contents = await buildGeminiContents(body, youtubeTranscript);
     const result = await callGemini(contents, geminiSystemPrompt, apiKey, options);
 
     // 注入預先取得或貼上的字幕（後端已清洗）

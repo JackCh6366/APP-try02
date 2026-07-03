@@ -3,12 +3,30 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig, loadEnv, type Plugin} from 'vite';
 import generateHandler from './api/generate';
+import discussHandler from './api/discuss';
+import videoInfoHandler from './api/video-info';
 
 function localApiPlugin(): Plugin {
   return {
     name: 'local-vercel-api',
     configureServer(server) {
-      server.middlewares.use('/api/generate', async (req, res) => {
+      server.middlewares.use('/api', async (req, res, next) => {
+        const reqUrl = req.url || '';
+        const urlPath = reqUrl.split('?')[0];
+        
+        let handler: any = null;
+        if (urlPath === '/generate') {
+          handler = generateHandler;
+        } else if (urlPath === '/discuss') {
+          handler = discussHandler;
+        } else if (urlPath === '/video-info') {
+          handler = videoInfoHandler;
+        }
+
+        if (!handler) {
+          return next();
+        }
+
         try {
           const chunks: Buffer[] = [];
 
@@ -18,9 +36,14 @@ function localApiPlugin(): Plugin {
 
           const rawBody = Buffer.concat(chunks).toString('utf8');
           const body = rawBody.trim() ? JSON.parse(rawBody) : {};
+          const query = reqUrl.includes('?') ? Object.fromEntries(new URL(reqUrl, 'http://localhost').searchParams) : {};
 
-          const vercelReq = Object.assign(req, { body });
+          const vercelReq = Object.assign(req, { body, query });
           const vercelRes = {
+            setHeader(name: string, value: string) {
+              res.setHeader(name, value);
+              return this;
+            },
             status(statusCode: number) {
               res.statusCode = statusCode;
               return this;
@@ -29,15 +52,18 @@ function localApiPlugin(): Plugin {
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify(payload));
             },
+            end(data?: any) {
+              res.end(data);
+            }
           };
 
-          await generateHandler(vercelReq, vercelRes);
+          await handler(vercelReq, vercelRes);
         } catch (error: any) {
           res.statusCode = 500;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({
             success: false,
-            error: error?.message || 'Local API handler failed.',
+            error: error?.message || `Local API handler for ${urlPath} failed.`,
           }));
         }
       });
