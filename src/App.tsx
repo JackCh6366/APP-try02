@@ -234,14 +234,18 @@ export default function App() {
           clearTimeout(safetyTimer);
         }
       } else {
-        // ── NVIDIA：一次性 JSON 回應，速度快，不需要串流 ──
+        // ── NVIDIA：一次性 JSON 回應 ──
+        // 注意：NVIDIA 與 Gemini 共用同一支 api/generate.ts function，
+        // 兩者都受 vercel.json 的 maxDuration=300s 限制。callNvidia 本身單次呼叫
+        // 上限 120 秒、失敗還會重試最多 3 次，正常情況偶爾抓到 60~100 秒屬合理範圍，
+        // 前端這裡的逾時必須夠寬，避免把「還在正常等待後端」誤判成失敗。
         const response = await fetch("/api/generate", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(60_000),
+          signal: AbortSignal.timeout(290_000),
         });
 
         const responseText = await response.text();
