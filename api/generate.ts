@@ -912,19 +912,25 @@ async function callGemini(
   const maxRetries = 3;
   let delay = 2000; // 2 seconds initial delay
 
+  // ── GEMINI_CALL_TIMEOUT_MS ──
+  // 留給 vercel.json maxDuration(300s) 足夠的緩衝：
+  // 250s（本次呼叫）+ 逐字稿預抓/JSON解析/串流收尾等雜項耗時，仍能在平台強制砍斷前，
+  // 由程式自己偵測到逾時、寫出清楚的錯誤訊息並正常結束回應。
+  const GEMINI_CALL_TIMEOUT_MS = 250_000;
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(280_000),
+        signal: AbortSignal.timeout(GEMINI_CALL_TIMEOUT_MS),
       });
 
       json = await res.json() as any;
 
       if (!res.ok) {
-        // If high demand (503) or rate limit (429), retry
+        // 高負載(503)或速率限制(429)才重試——這類錯誤通常是「瞬間」發生，重試合理。
         if ((res.status === 503 || res.status === 429) && attempt < maxRetries) {
           console.warn(
             `[callGemini] Got HTTP ${res.status} (${res.status === 503 ? "High demand" : "Rate limit"}). ` +
@@ -940,8 +946,27 @@ async function callGemini(
       }
       break; // Success
     } catch (err: any) {
-      // If we got a network error or fetch aborted/timeout, and we have retries left, retry too!
-      // (High demand/server overload might manifest as socket hangs/timeouts)
+      // ── 逾時/中斷錯誤：絕不重試 ──
+      // 單次呼叫已經吃掉 GEMINI_CALL_TIMEOUT_MS（250 秒），代表影片內容量本身就超出
+      // Gemini 在 Vercel Function 時限內能處理的範圍。重試只是原地再等 250 秒，
+      // 一定會撞上 vercel.json 的 maxDuration(300s) 而被平台強制砍斷連線，
+      // 讓使用者只看到神秘的「signal timed out」而不是清楚的錯誤訊息。
+      // 因此逾時/中斷一律「快速失敗」，把明確原因往外拋出，由呼叫端轉譯成友善提示。
+      const isTimeoutOrAbort =
+        err?.name === "TimeoutError" ||
+        err?.name === "AbortError" ||
+        /timeout|abort/i.test(String(err?.message || ""));
+
+      if (isTimeoutOrAbort) {
+        const timeoutErr = new Error(
+          `GEMINI_TIMEOUT: Gemini 分析時間超過 ${GEMINI_CALL_TIMEOUT_MS / 1000} 秒仍未回應，` +
+          `影片內容量（時長/無字幕需完整多模態解析）已超出可處理範圍。`
+        );
+        (timeoutErr as any).isGeminiTimeout = true;
+        throw timeoutErr;
+      }
+
+      // 非逾時的網路錯誤（例如瞬斷、socket hang up）才允許重試
       if (attempt < maxRetries) {
         console.warn(
           `[callGemini] Request failed: ${err.message || err}. ` +
@@ -1179,67 +1204,120 @@ export default async function handler(req: any, res: any) {
       return res.status(500).json({ success: false, error: "GEMINI_API_KEY not configured." });
     }
 
-    // 判斷是否能預先注入字幕，避免 Gemini 輸出長字串導致超時
-    // ─────────────────────────────────────────────────────────────
-    // Gemini + YouTube 路徑：
-    //   youtubeTranscript 在前面（約 L729）已預先抓好。
-    //   若字幕非空，告知 Gemini 略過逐字稿（hasFetchedTranscript=true），
-    //   後端再把乾淨字幕注入到 result.transcript。
-    //   若字幕為空（無字幕影片），仍讓 Gemini 從影音自行轉錄。
-    // ─────────────────────────────────────────────────────────────
-    let geminiTranscriptToInject = "";
-    if (body.mediaType === "transcript_paste") {
-      geminiTranscriptToInject = body.textTranscript || "";
-    } else if (body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink)) {
-      geminiTranscriptToInject = youtubeTranscript; // 可能為空（無字幕影片）
-    }
-
-    // 僅在有字幕時才告知 Gemini 略過逐字稿輸出
-    const hasTranscriptToInject = !!geminiTranscriptToInject.trim();
-    const geminiSystemPrompt = buildSystemPrompt(options, "gemini", hasTranscriptToInject);
-    const contents = await buildGeminiContents(body, youtubeTranscript);
-    const result = await callGemini(contents, geminiSystemPrompt, apiKey, options);
-
-    // 注入預先取得或貼上的字幕（後端已清洗）
-    if (hasTranscriptToInject && result && typeof result === "object") {
-      result.transcript = geminiTranscriptToInject;
-    }
-
-    return res.status(200).json({
-      success: true,
-      result,
-      usedModel: "gemini-2.5-flash",
+    // ── 切換為 NDJSON 串流回應 ──
+    // Gemini 的多模態影片分析耗時可能長達數分鐘，若讓前端單純 fetch() 苦等，
+    // 容易被瀏覽器/代理層誤判斷線，使用者體驗上也只看到一個轉圈圈。
+    // 改成串流後：
+    //   1. 每隔幾秒寫一行 {"type":"progress",...}，前端可即時顯示「已等待 N 秒」
+    //   2. 最終寫一行 {"type":"done",...} 帶正式結果或錯誤，前端讀到後結束串流
+    // 注意：一旦呼叫 res.writeHead 開始串流，後面就不能再用 res.status().json()，
+    // 所有這條路徑之後的錯誤都必須改成寫 ndjson 的 "done"（success:false）行結束。
+    res.writeHead(200, {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no", // 避免部分反向代理把輸出整批緩衝，延遲送達
     });
+
+    const streamStart = Date.now();
+    const heartbeat = setInterval(() => {
+      res.write(
+        JSON.stringify({
+          type: "progress",
+          elapsedSeconds: Math.round((Date.now() - streamStart) / 1000),
+        }) + "\n"
+      );
+    }, 8000);
+
+    try {
+      // 判斷是否能預先注入字幕，避免 Gemini 輸出長字串導致超時
+      // ─────────────────────────────────────────────────────────────
+      // Gemini + YouTube 路徑：
+      //   youtubeTranscript 在前面（約 L729）已預先抓好。
+      //   若字幕非空，告知 Gemini 略過逐字稿（hasFetchedTranscript=true），
+      //   後端再把乾淨字幕注入到 result.transcript。
+      //   若字幕為空（無字幕影片），仍讓 Gemini 從影音自行轉錄。
+      // ─────────────────────────────────────────────────────────────
+      let geminiTranscriptToInject = "";
+      if (body.mediaType === "transcript_paste") {
+        geminiTranscriptToInject = body.textTranscript || "";
+      } else if (body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink)) {
+        geminiTranscriptToInject = youtubeTranscript; // 可能為空（無字幕影片）
+      }
+
+      // 僅在有字幕時才告知 Gemini 略過逐字稿輸出
+      const hasTranscriptToInject = !!geminiTranscriptToInject.trim();
+      const geminiSystemPrompt = buildSystemPrompt(options, "gemini", hasTranscriptToInject);
+      const contents = await buildGeminiContents(body, youtubeTranscript);
+      const result = await callGemini(contents, geminiSystemPrompt, apiKey, options);
+
+      // 注入預先取得或貼上的字幕（後端已清洗）
+      if (hasTranscriptToInject && result && typeof result === "object") {
+        result.transcript = geminiTranscriptToInject;
+      }
+
+      clearInterval(heartbeat);
+      res.write(
+        JSON.stringify({
+          type: "done",
+          success: true,
+          result,
+          usedModel: "gemini-2.5-flash",
+        }) + "\n"
+      );
+      res.end();
+      return;
+    } catch (geminiErr: any) {
+      clearInterval(heartbeat);
+      const userMessage = geminiErr?.isGeminiTimeout
+        ? "影片長度超過 Gemini 規則建議，改用 NVIDIA 模型進行分析。"
+        : formatGenerateErrorMessage(geminiErr);
+
+      res.write(
+        JSON.stringify({
+          type: "done",
+          success: false,
+          error: userMessage,
+        }) + "\n"
+      );
+      res.end();
+      return;
+    }
 
   } catch (err: any) {
     console.error("[generate] Error:", err);
 
-    const raw: string = err?.message || "";
-
-    // ── 友善中文錯誤訊息：依照錯誤類型給出具體建議 ──
-    let userMessage: string;
-    if (/503|high demand|overloaded|Service Unavailable/i.test(raw)) {
-      userMessage =
-        "目前 AI 服務需求量過高（503），系統已自動重試仍未成功。" +
-        "請稍候 1～2 分鐘後再試，或切換至另一個 AI 模型（如 Google Gemini ↔ NVIDIA）。";
-    } else if (/429|rate.?limit|quota/i.test(raw)) {
-      userMessage =
-        "API 請求頻率已達上限（429 Rate Limit）。" +
-        "請稍候片刻後重試，或切換至其他 AI 模型。";
-    } else if (/timeout|abort|ETIMEDOUT|ECONNRESET|socket hang/i.test(raw)) {
-      userMessage =
-        "請求逾時（Timeout）：影片內容可能過長或伺服器暫時無回應" +
-        "建議改用較短的影片，或切換至另一個 AI 模型後重試。";
-    } else if (/private|age.?restrict|region.?lock/i.test(raw)) {
-      userMessage =
-        "此影片為私人影片、年齡限制影片或地區封鎖，無法取得內容，請嘗試其他影片。";
-    } else {
-      userMessage = raw || "發生未知錯誤，請稍後重試。";
-    }
-
+    // 此處只會接住「串流開始之前」發生的錯誤（例如逐字稿預抓、NVIDIA 路徑等），
+    // 因此仍可安全使用 res.status().json()。
     return res.status(500).json({
       success: false,
-      error: userMessage,
+      error: formatGenerateErrorMessage(err),
     });
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 將內部錯誤訊息轉譯成友善的中文提示（依錯誤類型給出具體建議）
+// ─────────────────────────────────────────────────────────────────────────────
+function formatGenerateErrorMessage(err: any): string {
+  const raw: string = err?.message || "";
+
+  if (err?.isGeminiTimeout) {
+    return "影片長度超過 Gemini 規則建議，改用 NVIDIA 模型進行分析。";
+  }
+  if (/503|high demand|overloaded|Service Unavailable/i.test(raw)) {
+    return (
+      "目前 AI 服務需求量過高（503），系統已自動重試仍未成功。" +
+      "請稍候 1～2 分鐘後再試，或切換至另一個 AI 模型（如 Google Gemini ↔ NVIDIA）。"
+    );
+  }
+  if (/429|rate.?limit|quota/i.test(raw)) {
+    return "API 請求頻率已達上限（429 Rate Limit）。請稍候片刻後重試，或切換至其他 AI 模型。";
+  }
+  if (/timeout|abort|ETIMEDOUT|ECONNRESET|socket hang/i.test(raw)) {
+    return "影片長度超過 Gemini 規則建議，改用 NVIDIA 模型進行分析。";
+  }
+  if (/private|age.?restrict|region.?lock/i.test(raw)) {
+    return "此影片為私人影片、年齡限制影片或地區封鎖，無法取得內容，請嘗試其他影片。";
+  }
+  return raw || "發生未知錯誤，請稍後重試。";
 }

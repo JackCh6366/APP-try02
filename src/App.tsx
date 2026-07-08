@@ -12,6 +12,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeResult, setActiveResult] = useState<MediaSummaryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [processingSeconds, setProcessingSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false); // 歷史側邊欄是否開啟，預設關閉以維持大版面
 
@@ -69,6 +70,7 @@ export default function App() {
       }, 3000);
     } else {
       setLoadingQuoteIdx(0);
+      setProcessingSeconds(0);
     }
     return () => {
       if (interval) clearInterval(interval);
@@ -146,6 +148,7 @@ export default function App() {
   }) => {
     setIsLoading(true);
     setError(null);
+    setProcessingSeconds(0);
 
     try {
       let geminiResult: any;
@@ -164,17 +167,81 @@ export default function App() {
 
         geminiResult = localResult;
         usedModelName = `本地模型・${payload.localConfig.modelName}`;
+      } else if (payload.provider === "gemini") {
+        // ── Gemini：後端改為 NDJSON 串流回應（見 api/generate.ts） ──
+        // 逐行讀取："progress" 行用來更新畫面上的等待秒數，"done" 行代表最終結果或錯誤。
+        // 前端這裡設一個 295 秒的最後防線（略高於後端自己的 250 秒 Gemini 呼叫上限＋緩衝），
+        // 正常情況下應該都是後端自己先送出 "done" 行結束，走不到這條防線。
+        const controller = new AbortController();
+        const safetyTimer = setTimeout(() => controller.abort(), 295_000);
+
+        try {
+          const response = await fetch("/api/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          });
+
+          if (!response.ok && !response.body) {
+            throw new Error(`API returned an empty response (${response.status}).`);
+          }
+          if (!response.body) {
+            throw new Error("此瀏覽器不支援串流回應，請改用 NVIDIA 模型或更新瀏覽器。");
+          }
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let finalData: any = null;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            let newlineIdx: number;
+            while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+              const line = buffer.slice(0, newlineIdx).trim();
+              buffer = buffer.slice(newlineIdx + 1);
+              if (!line) continue;
+
+              let msg: any;
+              try {
+                msg = JSON.parse(line);
+              } catch {
+                continue; // 忽略無法解析的行（理論上不應發生）
+              }
+
+              if (msg.type === "progress") {
+                setProcessingSeconds(msg.elapsedSeconds ?? 0);
+              } else if (msg.type === "done") {
+                finalData = msg;
+              }
+            }
+          }
+
+          if (!finalData) {
+            throw new Error("串流意外中斷，未收到最終結果。請再試一次，或切換至 NVIDIA 模型。");
+          }
+          if (!finalData.success) {
+            throw new Error(finalData.error || "分析失敗。");
+          }
+
+          geminiResult = finalData.result;
+          usedModelName = finalData.usedModel || "gemini-2.5-flash";
+        } finally {
+          clearTimeout(safetyTimer);
+        }
       } else {
-        // ── Gemini / NVIDIA：照舊呼叫 Vercel 後端 ──
-        // 前端加上 290 秒超時（略低於 Vercel Pro maxDuration=300s），
-        // 確保超時行為可預測，並能給出友善的中文錯誤提示。
+        // ── NVIDIA：一次性 JSON 回應，速度快，不需要串流 ──
         const response = await fetch("/api/generate", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(290_000),
+          signal: AbortSignal.timeout(60_000),
         });
 
         const responseText = await response.text();
@@ -193,7 +260,7 @@ export default function App() {
         }
 
         geminiResult = data.result;
-        usedModelName = data.usedModel || (payload.provider === "nvidia" ? "nvidia/llama-3.3-nemotron-super-49b-v1.5" : "gemini-2.5-flash-lite");
+        usedModelName = data.usedModel || "nvidia/llama-3.3-nemotron-super-49b-v1.5";
       }
 
       // Successful analysis! Register in storage
@@ -385,6 +452,11 @@ export default function App() {
                     {loadingQuotes[loadingQuoteIdx]}
                   </p>
                 </div>
+                {processingSeconds > 0 && (
+                  <p className="text-[11px] text-slate-400 font-semibold">
+                    已處理 {processingSeconds} 秒{processingSeconds > 200 ? "・影片較長或無字幕，可能需要多等一會兒" : ""}
+                  </p>
+                )}
                 <div className="text-[10px] text-slate-400 font-semibold space-y-1 pt-4 border-t border-slate-100">
                   <p>※ 提示：如果是大檔案（如超過 10MB），聽寫與多國語翻譯需要比較長的時間，請勿關閉視窗。</p>
                   <p>本模組直接呼叫 Gemini 3.5 億級參數音訊感知電路，免除中介伺服器，精度與安全性皆屬頂尖等級。</p>
