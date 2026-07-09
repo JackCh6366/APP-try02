@@ -919,7 +919,9 @@ async function callGemini(
   const GEMINI_CALL_TIMEOUT_MS = 250_000;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const attemptStart = Date.now();
     try {
+      console.log(`[callGemini] attempt ${attempt + 1}/${maxRetries + 1} START`);
       res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -944,8 +946,10 @@ async function callGemini(
           `Gemini API error ${res.status}: ${json?.error?.message || JSON.stringify(json)}`
         );
       }
+      console.log(`[callGemini] attempt ${attempt + 1} SUCCESS after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s`);
       break; // Success
     } catch (err: any) {
+      const attemptElapsed = ((Date.now() - attemptStart) / 1000).toFixed(1);
       // ── 逾時/中斷錯誤：絕不重試 ──
       // 單次呼叫已經吃掉 GEMINI_CALL_TIMEOUT_MS（250 秒），代表影片內容量本身就超出
       // Gemini 在 Vercel Function 時限內能處理的範圍。重試只是原地再等 250 秒，
@@ -958,6 +962,7 @@ async function callGemini(
         /timeout|abort/i.test(String(err?.message || ""));
 
       if (isTimeoutOrAbort) {
+        console.error(`[callGemini] attempt ${attempt + 1} TIMED OUT after ${attemptElapsed}s`);
         const timeoutErr = new Error(
           `GEMINI_TIMEOUT: Gemini 分析時間超過 ${GEMINI_CALL_TIMEOUT_MS / 1000} 秒仍未回應，` +
           `影片內容量（時長/無字幕需完整多模態解析）已超出可處理範圍。`
@@ -965,6 +970,8 @@ async function callGemini(
         (timeoutErr as any).isGeminiTimeout = true;
         throw timeoutErr;
       }
+
+      console.warn(`[callGemini] attempt ${attempt + 1} FAILED after ${attemptElapsed}s: ${err?.message || err}`);
 
       // 非逾時的網路錯誤（例如瞬斷、socket hang up）才允許重試
       if (attempt < maxRetries) {
@@ -1136,9 +1143,15 @@ export default async function handler(req: any, res: any) {
     // 這能讓我們在 Gemini 模式中同樣實施「後端注入逐字稿」策略，
     // 大幅縮短 LLM 的 JSON 生成時間，避免 Vercel 60 秒的超時限制。
     let youtubeTranscript = "";
+    const handlerStart = Date.now();
     if (body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink)) {
       const cleanUrl = cleanYoutubeUrl(body.videoLink.trim());
+      console.log(`[generate] fetchYoutubeTranscript START url=${cleanUrl}`);
       youtubeTranscript = await fetchYoutubeTranscript(cleanUrl);
+      console.log(
+        `[generate] fetchYoutubeTranscript DONE found=${!!youtubeTranscript.trim()} ` +
+        `len=${youtubeTranscript.length} elapsed=${((Date.now() - handlerStart) / 1000).toFixed(1)}s`
+      );
     }
 
     // ── NVIDIA path (text-only) ──
@@ -1219,6 +1232,7 @@ export default async function handler(req: any, res: any) {
     });
 
     const streamStart = Date.now();
+    const elapsed = () => `${((Date.now() - streamStart) / 1000).toFixed(1)}s`;
     const heartbeat = setInterval(() => {
       res.write(
         JSON.stringify({
@@ -1246,15 +1260,29 @@ export default async function handler(req: any, res: any) {
 
       // 僅在有字幕時才告知 Gemini 略過逐字稿輸出
       const hasTranscriptToInject = !!geminiTranscriptToInject.trim();
+
+      console.log(
+        `[generate][gemini] START mediaType=${body.mediaType} ` +
+        `hasTranscript=${hasTranscriptToInject} transcriptLen=${geminiTranscriptToInject.length} ` +
+        `videoLink=${body.videoLink || "(n/a)"} elapsed=${elapsed()}`
+      );
+
       const geminiSystemPrompt = buildSystemPrompt(options, "gemini", hasTranscriptToInject);
+
+      console.log(`[generate][gemini] buildGeminiContents START elapsed=${elapsed()}`);
       const contents = await buildGeminiContents(body, youtubeTranscript);
+      console.log(`[generate][gemini] buildGeminiContents DONE elapsed=${elapsed()}`);
+
+      console.log(`[generate][gemini] callGemini START elapsed=${elapsed()}`);
       const result = await callGemini(contents, geminiSystemPrompt, apiKey, options);
+      console.log(`[generate][gemini] callGemini DONE elapsed=${elapsed()}`);
 
       // 注入預先取得或貼上的字幕（後端已清洗）
       if (hasTranscriptToInject && result && typeof result === "object") {
         result.transcript = geminiTranscriptToInject;
       }
 
+      console.log(`[generate][gemini] SUCCESS totalElapsed=${elapsed()}`);
       clearInterval(heartbeat);
       res.write(
         JSON.stringify({
@@ -1268,8 +1296,21 @@ export default async function handler(req: any, res: any) {
       return;
     } catch (geminiErr: any) {
       clearInterval(heartbeat);
+
+      const hasTranscriptToInject = !!(
+        (body.mediaType === "transcript_paste" && body.textTranscript) ||
+        (body.mediaType === "link" && body.videoLink && isYoutubeUrl(body.videoLink) && youtubeTranscript)
+      );
+
+      console.error(
+        `[generate][gemini] FAILED totalElapsed=${elapsed()} ` +
+        `hasTranscript=${hasTranscriptToInject} isGeminiTimeout=${!!geminiErr?.isGeminiTimeout} ` +
+        `errName=${geminiErr?.name} errMessage=${geminiErr?.message}`
+      );
+
       const userMessage = geminiErr?.isGeminiTimeout
-        ? "影片長度超過 Gemini 規則建議，改用 NVIDIA 模型進行分析。"
+        ? `影片長度超過 Gemini 規則建議，改用 NVIDIA 模型進行分析。` +
+          `（偵測狀態：${hasTranscriptToInject ? "本片有字幕，仍逾時，可能是 Gemini API 當下較忙碌" : "本片未偵測到字幕，已走完整影音多模態分析，耗時較長"}，已等待 ${elapsed()}）`
         : formatGenerateErrorMessage(geminiErr);
 
       res.write(
