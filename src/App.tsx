@@ -319,7 +319,7 @@ export default function App() {
         err?.message?.toLowerCase().includes("aborted");
       setError(
         isTimeout
-          ? "⏱️ 請求超時：AI 分析時間超過限制（約 290 秒）。\n可能原因：① 影片過長或解析度過高 ② Vercel 免費方案有 60 秒硬上限（需升級 Pro）③ 網路不穩。\n建議：改用較短片段、切換 NVIDIA + 字幕貼上模式，或升級 Vercel Pro 方案。"
+          ? "⏱️ 連線意外中斷：可能是網路不穩，或分析耗時過長被中斷連線。\n建議：改用較短片段、切換 NVIDIA 模型，或稍後重試。"
           : err.message || "處理影音時與伺服器斷開，或是音訊過長導致超時。請再試一次。"
       );
     } finally {

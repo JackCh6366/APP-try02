@@ -921,28 +921,59 @@ async function callGemini(
   const maxRetries = 3;
   let delay = 2000; // 2 seconds initial delay
 
-  // ── GEMINI_CALL_TIMEOUT_MS ──
-  // 留給 vercel.json maxDuration(300s) 足夠的緩衝：
-  // 250s（本次呼叫）+ 逐字稿預抓/JSON解析/串流收尾等雜項耗時，仍能在平台強制砍斷前，
-  // 由程式自己偵測到逾時、寫出清楚的錯誤訊息並正常結束回應。
-  const GEMINI_CALL_TIMEOUT_MS = 250_000;
+  // ── 總預算制（TOTAL_BUDGET_MS） ──
+  // 修正過的 bug：先前每次重試都重新給 250 秒的獨立額度，完全沒考慮
+  // 「這已經是第幾次重試、總共花了多少時間、離 vercel.json maxDuration(300s)
+  //  這個平台大限還剩多少」。連續遇到 503 時，重試延遲（2s+5s+12.5s...）疊加
+  // 多次嘗試，很容易在最後一次嘗試進行到一半時，被 Vercel 平台直接強制砍斷
+  // （Vercel Runtime Timeout Error），導致我們自己的逾時偵測與友善錯誤訊息
+  // 完全來不及執行。
+  //
+  // 修正做法：所有嘗試 + 重試延遲，共用同一個 260 秒總預算（TOTAL_BUDGET_MS）。
+  // 每次嘗試前，先檢查剩餘預算是否還足夠進行一次有意義的嘗試（>15 秒），
+  // 不夠就立刻「快速失敗」，絕不啟動注定會被平台砍斷的最後一擊。
+  const TOTAL_BUDGET_MS = 260_000;
+  const MIN_USEFUL_ATTEMPT_MS = 15_000; // 少於這個時間不足以取得有意義的回應，直接判定逾時
+  const callStart = Date.now();
+  const remainingBudget = () => TOTAL_BUDGET_MS - (Date.now() - callStart);
+
+  const throwBudgetExhausted = (reason: string): never => {
+    console.error(`[callGemini] Budget exhausted (${reason}) after ${((Date.now() - callStart) / 1000).toFixed(1)}s`);
+    const timeoutErr = new Error(
+      `GEMINI_TIMEOUT: Gemini 分析總耗時已達 ${TOTAL_BUDGET_MS / 1000} 秒預算上限（${reason}），` +
+      `影片內容量（時長/無字幕需完整多模態解析，或 API 當下負載過高）已超出可處理範圍。`
+    );
+    (timeoutErr as any).isGeminiTimeout = true;
+    throw timeoutErr;
+  };
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const attemptStart = Date.now();
+    const budgetLeft = remainingBudget();
+
+    if (budgetLeft < MIN_USEFUL_ATTEMPT_MS) {
+      throwBudgetExhausted(`僅剩 ${(budgetLeft / 1000).toFixed(1)}s，不足以再嘗試一次`);
+    }
+
     try {
-      console.log(`[callGemini] attempt ${attempt + 1}/${maxRetries + 1} START`);
+      console.log(`[callGemini] attempt ${attempt + 1}/${maxRetries + 1} START (budgetLeft=${(budgetLeft / 1000).toFixed(1)}s)`);
       res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(GEMINI_CALL_TIMEOUT_MS),
+        signal: AbortSignal.timeout(budgetLeft), // 用剩餘總預算，而非重新給滿額
       });
 
       json = await res.json() as any;
 
       if (!res.ok) {
         // 高負載(503)或速率限制(429)才重試——這類錯誤通常是「瞬間」發生，重試合理。
+        // 但重試前也要確認：扣掉本次退避延遲後，是否還有剩餘預算值得再試一次。
         if ((res.status === 503 || res.status === 429) && attempt < maxRetries) {
+          const budgetAfterDelay = remainingBudget() - delay;
+          if (budgetAfterDelay < MIN_USEFUL_ATTEMPT_MS) {
+            throwBudgetExhausted(`HTTP ${res.status} 且退避延遲後預算不足`);
+          }
           console.warn(
             `[callGemini] Got HTTP ${res.status} (${res.status === 503 ? "High demand" : "Rate limit"}). ` +
             `Retrying in ${delay}ms... (Attempt ${attempt + 1}/${maxRetries})`
@@ -960,9 +991,9 @@ async function callGemini(
     } catch (err: any) {
       const attemptElapsed = ((Date.now() - attemptStart) / 1000).toFixed(1);
       // ── 逾時/中斷錯誤：絕不重試 ──
-      // 單次呼叫已經吃掉 GEMINI_CALL_TIMEOUT_MS（250 秒），代表影片內容量本身就超出
-      // Gemini 在 Vercel Function 時限內能處理的範圍。重試只是原地再等 250 秒，
-      // 一定會撞上 vercel.json 的 maxDuration(300s) 而被平台強制砍斷連線，
+      // 本次嘗試已經吃掉剩餘預算（AbortSignal 用的就是 budgetLeft），代表影片內容量
+      // 本身就超出 Gemini 在 Vercel Function 時限內能處理的範圍。重試只會再吃光剩餘
+      // 預算，一定會撞上 vercel.json 的 maxDuration(300s) 而被平台強制砍斷連線，
       // 讓使用者只看到神秘的「signal timed out」而不是清楚的錯誤訊息。
       // 因此逾時/中斷一律「快速失敗」，把明確原因往外拋出，由呼叫端轉譯成友善提示。
       const isTimeoutOrAbort =
@@ -972,18 +1003,17 @@ async function callGemini(
 
       if (isTimeoutOrAbort) {
         console.error(`[callGemini] attempt ${attempt + 1} TIMED OUT after ${attemptElapsed}s`);
-        const timeoutErr = new Error(
-          `GEMINI_TIMEOUT: Gemini 分析時間超過 ${GEMINI_CALL_TIMEOUT_MS / 1000} 秒仍未回應，` +
-          `影片內容量（時長/無字幕需完整多模態解析）已超出可處理範圍。`
-        );
-        (timeoutErr as any).isGeminiTimeout = true;
-        throw timeoutErr;
+        throwBudgetExhausted(`第 ${attempt + 1} 次嘗試逾時`);
       }
 
       console.warn(`[callGemini] attempt ${attempt + 1} FAILED after ${attemptElapsed}s: ${err?.message || err}`);
 
-      // 非逾時的網路錯誤（例如瞬斷、socket hang up）才允許重試
+      // 非逾時的網路錯誤（例如瞬斷、socket hang up）才允許重試——同樣要檢查剩餘預算
       if (attempt < maxRetries) {
+        const budgetAfterDelay = remainingBudget() - delay;
+        if (budgetAfterDelay < MIN_USEFUL_ATTEMPT_MS) {
+          throwBudgetExhausted(`網路錯誤且退避延遲後預算不足`);
+        }
         console.warn(
           `[callGemini] Request failed: ${err.message || err}. ` +
           `Retrying in ${delay}ms... (Attempt ${attempt + 1}/${maxRetries})`
