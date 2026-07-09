@@ -477,6 +477,7 @@ async function fetchYoutubeTranscript(url: string): Promise<string> {
     const cleanUrl = cleanYoutubeUrl(url.trim());
     const LANG_FALLBACKS = ["zh-TW", "zh", "en"];
     let segments: any[] | null = null;
+    const attemptErrors: string[] = [];
 
     // 自訂 fetch 用於注入 Cookie 繞過 YouTube 同意頁面 / 機器人驗證，
     // 並帶入合適的 User-Agent 確保 /api/timedtext 不會回傳空回應。
@@ -497,8 +498,9 @@ async function fetchYoutubeTranscript(url: string): Promise<string> {
           fetch: customFetch,
         });
         if (segments?.length) break;
-      } catch {
-        // 該語言不存在，繼續嘗試下一個
+      } catch (langErr: any) {
+        // 該語言不存在，繼續嘗試下一個——但把原因記下來，不要靜默吞掉
+        attemptErrors.push(`[${lang}] ${langErr?.message || langErr}`);
       }
     }
 
@@ -507,13 +509,20 @@ async function fetchYoutubeTranscript(url: string): Promise<string> {
         segments = await YoutubeTranscript.fetchTranscript(cleanUrl, {
           fetch: customFetch,
         });
-      } catch {
-        // 忽略錯誤
+      } catch (defaultErr: any) {
+        attemptErrors.push(`[default] ${defaultErr?.message || defaultErr}`);
       }
     }
 
+    if (!segments?.length && attemptErrors.length) {
+      // 這裡印出「真正」失敗原因：可能是套件被 YouTube 擋、影片本身無字幕、
+      // 或是網路/驗證問題。之前這裡被靜默吞掉，導致完全無法診斷。
+      console.warn(`[fetchYoutubeTranscript] All attempts failed for ${cleanUrl}: ${attemptErrors.join(" | ")}`);
+    }
+
     return (segments ?? []).map((s: any) => s.text).join(" ");
-  } catch {
+  } catch (outerErr: any) {
+    console.warn(`[fetchYoutubeTranscript] Unexpected error: ${outerErr?.message || outerErr}`);
     return "";
   }
 }
