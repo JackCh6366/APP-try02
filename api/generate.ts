@@ -756,18 +756,32 @@ function buildSystemPrompt(
   };
   const langList = options.targetLanguages.map((l) => langMap[l] || l).join(", ");
 
-  // ── 深度需求：量化字數要求（還原 6/30 穩定版設定，避免模型偷懶輸出過短內容）──
+  // ── 2026/07/10 新增：偵測「Gemini + 無字幕（需完整影音多模態分析＋自行聽打逐字稿）」這條最慢的路徑 ──
+  // 這條路徑本身已經比純文字分析慢很多（要即時聽整支影片＋自己產生逐字稿），
+  // 若再疊加下面「detailed 模式強制 ≥10000 字」的巨量輸出要求，
+  // 極容易撞上 callGemini() 裡的 280 秒總預算（TOTAL_BUDGET_MS）而逾時失敗。
+  // 6/30 穩定版本原本沒有強制字數門檻，模型自行決定長短，因此當時能在時間內跑完。
+  // 這裡的做法：只在「這條最慢的路徑」放寬字數要求，其餘路徑（有字幕/NVIDIA，本身就快）維持原本高品質要求不變。
+  const isSlowGeminiMultimodal = provider === "gemini" && !hasFetchedTranscript;
+
+  // ── 深度需求：量化字數要求 ──
   const depthInstruction =
     options.depth === "quick"
       ? "Produce a concise but complete summary. All text fields combined should be at least 3000 Traditional Chinese characters."
+      : isSlowGeminiMultimodal
+      ? "Produce a thorough but efficient analysis. All text fields combined should be at least 4000 Traditional Chinese characters. The summaryText should be at least 500 characters. Each translation should be at least 1000 characters. Prioritize covering all key content accurately and completing the FULL JSON response within the available time — do NOT pad with unnecessary repetition, but do not omit important information either."
       : "Produce an EXTREMELY DETAILED and COMPREHENSIVE analysis. ALL text fields combined MUST reach at least 10000 Traditional Chinese characters. Every segment summary should be at least 300 characters. The summaryText should be at least 800 characters. Each translation should be at least 2000 characters. Do NOT truncate or summarize briefly — expand every point with full context, background, examples and reasoning.";
 
-  // ── 項目數量要求（還原 6/30 穩定版設定）──
+  // ── 項目數量要求 ──
   const quantityInstruction =
     options.depth === "quick"
       ? `- segments array should contain at least 4 items, each with a clear summary.
 - keyConcepts should contain at least 6 items.
 - actionItems should contain at least 4 items if any are present in the content.`
+      : isSlowGeminiMultimodal
+      ? `- segments array should contain at least 5 items, each with a clear, focused summary.
+- keyConcepts should contain at least 8 items, each being a complete phrase or short explanation.
+- actionItems should contain at least 5 items if any are present in the content.`
       : `- segments array MUST contain at least 8 items for detailed depth, each with a thorough summary.
 - keyConcepts MUST contain at least 15 items, each being a complete phrase or short explanation (not just a single word).
 - actionItems MUST contain at least 10 items if any are present in the content.`;
@@ -783,7 +797,7 @@ function buildSystemPrompt(
   // （此為後來版本新增的防呆架構，予以保留，不還原成舊版「模型自行輸出逐字稿」的做法。）
   const transcriptInstruction = (provider === "nvidia" || hasFetchedTranscript)
     ? `"transcript": "" (IMPORTANT: always output empty string for this field — transcript is injected separately)`
-    : `"transcript": "string — full verbatim transcription of spoken content, MUST be written in Traditional Chinese (繁體中文) if source is Chinese, otherwise keep original language; must be detailed and complete"`;
+    : `"transcript": "string — accurate transcription of spoken content capturing all substantive points, MUST be written in Traditional Chinese (繁體中文) if source is Chinese, otherwise keep original language; be complete but avoid verbatim filler words/repetition to keep generation time reasonable"`;
 
   // NVIDIA 專屬的嚴格 JSON 格式規則（還原 6/30 穩定版設定，降低截斷/格式錯誤機率）
   const nvidiaJsonRules = provider === "nvidia"
