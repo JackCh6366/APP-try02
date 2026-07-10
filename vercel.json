@@ -5,6 +5,9 @@
     },
     "api/video-info.ts": {
       "maxDuration": 15
+    },
+    "api/generate-video-async.ts": {
+      "maxDuration": 150
     }
   }
 }
